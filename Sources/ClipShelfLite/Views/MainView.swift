@@ -128,7 +128,7 @@ struct MainView: View {
                 }
             )
             .background(KeyboardCaptureView { event in
-                handleKey(event)
+                handleKey(event, scrollProxy: proxy)
             })
             .background(
                 DragSelectionCaptureView(
@@ -283,7 +283,7 @@ struct MainView: View {
         stopAutoScroll()
     }
 
-    private func handleKey(_ event: NSEvent) {
+    private func handleKey(_ event: NSEvent, scrollProxy: ScrollViewProxy? = nil) {
         if event.modifierFlags.contains(.command) {
             handleCommandKey(event)
             return
@@ -291,9 +291,9 @@ struct MainView: View {
 
         switch event.keyCode {
         case 126:
-            moveFocus(delta: -1)
+            moveFocus(delta: -1, scrollProxy: scrollProxy)
         case 125:
-            moveFocus(delta: 1)
+            moveFocus(delta: 1, scrollProxy: scrollProxy)
         case 49:
             guard selectedIDs.count <= 1 else { return }
             if let item = previewItems.first {
@@ -392,7 +392,7 @@ struct MainView: View {
         anchorID = focusedID
     }
 
-    private func moveFocus(delta: Int) {
+    private func moveFocus(delta: Int, scrollProxy: ScrollViewProxy? = nil) {
         guard !filteredItems.isEmpty else {
             focusedID = nil
             selectedIDs.removeAll()
@@ -411,6 +411,16 @@ struct MainView: View {
         focusedID = nextID
         selectedIDs = [nextID]
         anchorID = nextID
+        scrollFocusedItemIntoView(nextID, delta: delta, scrollProxy: scrollProxy)
+    }
+
+    private func scrollFocusedItemIntoView(_ id: ClipItem.ID, delta: Int, scrollProxy: ScrollViewProxy?) {
+        guard let scrollProxy else { return }
+
+        let anchor: UnitPoint = delta > 0 ? .bottom : .top
+        withAnimation(.easeOut(duration: 0.12)) {
+            scrollProxy.scrollTo(id, anchor: anchor)
+        }
     }
 
     private func toggleSelectionForKeyboard(_ id: ClipItem.ID) {
