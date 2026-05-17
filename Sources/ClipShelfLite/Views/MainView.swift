@@ -407,6 +407,8 @@ struct MainView: View {
             currentIndex = delta > 0 ? -1 : filteredItems.count
         }
         let nextIndex = min(max(currentIndex + delta, 0), filteredItems.count - 1)
+        guard nextIndex != currentIndex else { return }
+
         let nextID = filteredItems[nextIndex].id
         focusedID = nextID
         selectedIDs = [nextID]
