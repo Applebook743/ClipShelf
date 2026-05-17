@@ -20,6 +20,7 @@ struct MainView: View {
     @State private var commandKeyMonitor: Any?
     @State private var appIconChoice = AppIconPreferences.selected
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
+    @State private var pinHotKey = PinHotKeyDefaults.load()
 
     private var filteredItems: [ClipItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -184,6 +185,9 @@ struct MainView: View {
             .onReceive(NotificationCenter.default.publisher(for: ClearSelectionHotKeyDefaults.changedNotification)) { notification in
                 clearSelectionHotKey = notification.object as? HotKeyConfiguration ?? ClearSelectionHotKeyDefaults.load()
             }
+            .onReceive(NotificationCenter.default.publisher(for: PinHotKeyDefaults.changedNotification)) { notification in
+                pinHotKey = notification.object as? HotKeyConfiguration ?? PinHotKeyDefaults.load()
+            }
         }
     }
 
@@ -231,6 +235,15 @@ struct MainView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("设置")
+
+                Button {
+                    togglePinnedForActionItems()
+                } label: {
+                    Image(systemName: "pin")
+                }
+                .buttonStyle(.borderless)
+                .disabled(actionItems.isEmpty)
+                .help("置顶选中的记录")
 
                 Button(role: .destructive) {
                     deleteSelectedOrClear()
@@ -328,6 +341,11 @@ struct MainView: View {
                 return nil
             }
 
+            if pinHotKey.matches(event) {
+                togglePinnedForActionItems()
+                return nil
+            }
+
             if event.modifierFlags.contains(.command),
                ["a", "c", "v"].contains(event.charactersIgnoringModifiers?.lowercased()) {
                 handleCommandKey(event)
@@ -379,6 +397,16 @@ struct MainView: View {
     private func selectAllVisibleItems() {
         selectedIDs = Set(filteredItems.map(\.id))
         focusedID = filteredItems.first?.id
+        anchorID = focusedID
+    }
+
+    private func togglePinnedForActionItems() {
+        let items = actionItems
+        let ids = Set(items.map(\.id))
+        guard !ids.isEmpty else { return }
+        store.togglePinned(ids: ids)
+        selectedIDs = ids
+        focusedID = items.first?.id ?? focusedID
         anchorID = focusedID
     }
 
@@ -657,6 +685,10 @@ private struct ClipRow: View {
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(2)
                 HStack(spacing: 8) {
+                    if item.isPinned {
+                        Label("已置顶", systemImage: "pin.fill")
+                            .labelStyle(.titleAndIcon)
+                    }
                     Text(kindText)
                     Text(DateText.formatter.string(from: item.createdAt))
                 }
@@ -665,6 +697,14 @@ private struct ClipRow: View {
             }
 
             Spacer()
+
+            Button {
+                store.togglePinned(item)
+            } label: {
+                Image(systemName: item.isPinned ? "pin.fill" : "pin")
+            }
+            .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
+            .delayedTooltip(item.isPinned ? "取消置顶" : "置顶")
 
             Button {
                 store.copy(item)

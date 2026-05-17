@@ -4,6 +4,7 @@ set -euo pipefail
 APP_NAME="ClipShelf"
 BUNDLE_ID="local.codex.ClipShelf"
 MIN_SYSTEM_VERSION="13.0"
+APP_VERSION="1.1.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -54,7 +55,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>

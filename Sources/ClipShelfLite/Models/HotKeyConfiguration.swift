@@ -35,6 +35,11 @@ struct HotKeyConfiguration: Codable, Equatable {
         modifiers: UInt32(cmdKey)
     )
 
+    static let defaultPinValue = HotKeyConfiguration(
+        keyCode: UInt32(kVK_ANSI_P),
+        modifiers: UInt32(cmdKey | shiftKey)
+    )
+
     static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var result: UInt32 = 0
         if flags.contains(.command) { result |= UInt32(cmdKey) }
@@ -74,6 +79,26 @@ enum ClearSelectionHotKeyDefaults {
         guard let data = UserDefaults.standard.data(forKey: key),
               let configuration = try? JSONDecoder().decode(HotKeyConfiguration.self, from: data) else {
             return .defaultClearSelectionValue
+        }
+        return configuration
+    }
+
+    static func save(_ configuration: HotKeyConfiguration) {
+        if let data = try? JSONEncoder().encode(configuration) {
+            UserDefaults.standard.set(data, forKey: key)
+            NotificationCenter.default.post(name: changedNotification, object: configuration)
+        }
+    }
+}
+
+enum PinHotKeyDefaults {
+    static let changedNotification = Notification.Name("ClipShelfPinHotKeyChanged")
+    private static let key = "pinHotKey.configuration"
+
+    static func load() -> HotKeyConfiguration {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let configuration = try? JSONDecoder().decode(HotKeyConfiguration.self, from: data) else {
+            return .defaultPinValue
         }
         return configuration
     }

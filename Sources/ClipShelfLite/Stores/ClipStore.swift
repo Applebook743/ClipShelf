@@ -84,6 +84,25 @@ final class ClipStore: ObservableObject {
         save()
     }
 
+    func togglePinned(_ item: ClipItem) {
+        togglePinned(ids: [item.id])
+    }
+
+    func togglePinned(ids: Set<ClipItem.ID>) {
+        guard !ids.isEmpty else { return }
+        let shouldPin = items.contains { ids.contains($0.id) && !$0.isPinned }
+        setPinned(ids: ids, pinned: shouldPin)
+    }
+
+    func setPinned(ids: Set<ClipItem.ID>, pinned: Bool) {
+        guard !ids.isEmpty else { return }
+        for index in items.indices where ids.contains(items[index].id) {
+            items[index].isPinned = pinned
+        }
+        sortItems()
+        save()
+    }
+
     func clearHistory() {
         items.removeAll()
         save()
@@ -247,12 +266,33 @@ final class ClipStore: ObservableObject {
 
         items.removeAll { isDuplicate($0, item) }
         items.insert(item, at: 0)
+        sortItems()
 
         if items.count > maxItems {
-            items.removeLast(items.count - maxItems)
+            trimToMaxItems()
         }
 
         save()
+    }
+
+    private func sortItems() {
+        items.sort { first, second in
+            if first.isPinned != second.isPinned {
+                return first.isPinned && !second.isPinned
+            }
+
+            return first.createdAt > second.createdAt
+        }
+    }
+
+    private func trimToMaxItems() {
+        while items.count > maxItems {
+            if let lastUnpinnedIndex = items.lastIndex(where: { !$0.isPinned }) {
+                items.remove(at: lastUnpinnedIndex)
+            } else {
+                items.removeLast()
+            }
+        }
     }
 
     private func isDuplicate(_ lhs: ClipItem?, _ rhs: ClipItem) -> Bool {
@@ -279,6 +319,7 @@ final class ClipStore: ObservableObject {
         do {
             let data = try Data(contentsOf: storageURL)
             items = try JSONDecoder().decode([ClipItem].self, from: data)
+            sortItems()
         } catch {
             items = []
         }

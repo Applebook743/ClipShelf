@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var selectionColor = SelectionColorPreferences.color
     @State private var hotKey = HotKeyDefaults.load()
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
+    @State private var pinHotKey = PinHotKeyDefaults.load()
     @State private var appIconChoice = AppIconPreferences.selected
 
     var body: some View {
@@ -43,6 +44,9 @@ struct SettingsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: ClearSelectionHotKeyDefaults.changedNotification)) { notification in
             clearSelectionHotKey = notification.object as? HotKeyConfiguration ?? ClearSelectionHotKeyDefaults.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: PinHotKeyDefaults.changedNotification)) { notification in
+            pinHotKey = notification.object as? HotKeyConfiguration ?? PinHotKeyDefaults.load()
         }
         .onReceive(NotificationCenter.default.publisher(for: AppIconPreferences.changedNotification)) { notification in
             appIconChoice = notification.object as? AppIconChoice ?? AppIconPreferences.selected
@@ -152,6 +156,16 @@ struct SettingsView: View {
                 HotKeyRecorderView(
                     configuration: $clearSelectionHotKey,
                     save: ClearSelectionHotKeyDefaults.save,
+                    pausesGlobalHotKey: false
+                )
+            }
+
+            HStack {
+                Text("置顶选中记录")
+                Spacer()
+                HotKeyRecorderView(
+                    configuration: $pinHotKey,
+                    save: PinHotKeyDefaults.save,
                     pausesGlobalHotKey: false
                 )
             }
