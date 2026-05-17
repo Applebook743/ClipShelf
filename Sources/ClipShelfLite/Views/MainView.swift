@@ -421,8 +421,7 @@ struct MainView: View {
             return
         }
 
-        guard let scrollProxy else { return }
-        scrollProxy.scrollTo(id, anchor: .center)
+        scrollHistoryViewByRows(delta)
     }
 
     private func scrollNativeFocusedItemIntoView(_ id: ClipItem.ID) -> Bool {
@@ -464,10 +463,16 @@ struct MainView: View {
         guard proposedY != visible.origin.y else { return }
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.06
+            context.duration = 0.04
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             clipView.animator().setBoundsOrigin(CGPoint(x: visible.origin.x, y: proposedY))
         }
+    }
+
+    private func scrollHistoryViewByRows(_ direction: Int) {
+        guard let scrollView = historyScrollView else { return }
+        let rowHeight: CGFloat = 78
+        scrollHistoryViewByGlobalDelta(CGFloat(direction) * rowHeight, scrollView: scrollView)
     }
 
     private func toggleSelectionForKeyboard(_ id: ClipItem.ID) {
