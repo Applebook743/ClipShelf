@@ -155,23 +155,14 @@ struct MainView: View {
             .onPreferenceChange(HistoryViewportFramePreferenceKey.self) { frame in
                 historyViewportFrame = frame
             }
-            .onAppear {
-                ensureFocusedItem()
-            }
             .onChange(of: store.items.first?.id) { newID in
                 guard let newID else { return }
-                focusedID = newID
-                selectedIDs = [newID]
-                anchorID = newID
                 withAnimation(.easeOut(duration: 0.18)) {
                     proxy.scrollTo(newID, anchor: .top)
                 }
             }
             .onChange(of: searchText) { _ in
-                focusedID = filteredItems.first?.id
-                selectedIDs.removeAll()
-                anchorID = focusedID
-                dragAnchorID = nil
+                clearSelection()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 clearSelection()
@@ -274,27 +265,18 @@ struct MainView: View {
         .background(AppTheme.appBackground)
     }
 
-    private func ensureFocusedItem() {
-        if focusedID == nil || !filteredItems.contains(where: { $0.id == focusedID }) {
-            focusedID = filteredItems.first?.id
-        }
-    }
-
     private func deleteSelectedOrClear() {
         if selectedIDs.isEmpty {
             store.clearHistory()
-            focusedID = nil
-            anchorID = nil
         } else {
             store.remove(ids: selectedIDs)
-            selectedIDs.removeAll()
-            focusedID = filteredItems.first?.id
-            anchorID = focusedID
         }
+        clearSelection()
     }
 
     private func clearSelection() {
         selectedIDs.removeAll()
+        focusedID = nil
         anchorID = nil
         dragAnchorID = nil
         isDragSelecting = false
@@ -377,7 +359,7 @@ struct MainView: View {
     }
 
     private var focusedItem: ClipItem? {
-        guard let focusedID else { return filteredItems.first }
+        guard let focusedID else { return nil }
         return filteredItems.first { $0.id == focusedID }
     }
 
@@ -413,14 +395,22 @@ struct MainView: View {
     private func moveFocus(delta: Int) {
         guard !filteredItems.isEmpty else {
             focusedID = nil
+            selectedIDs.removeAll()
+            anchorID = nil
             return
         }
 
-        let currentIndex = focusedID.flatMap { id in
-            filteredItems.firstIndex { $0.id == id }
-        } ?? 0
+        let currentIndex: Int
+        if let focusedID, let index = filteredItems.firstIndex(where: { $0.id == focusedID }) {
+            currentIndex = index
+        } else {
+            currentIndex = delta > 0 ? -1 : filteredItems.count
+        }
         let nextIndex = min(max(currentIndex + delta, 0), filteredItems.count - 1)
-        focusedID = filteredItems[nextIndex].id
+        let nextID = filteredItems[nextIndex].id
+        focusedID = nextID
+        selectedIDs = [nextID]
+        anchorID = nextID
     }
 
     private func toggleSelectionForKeyboard(_ id: ClipItem.ID) {
