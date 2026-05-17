@@ -1,0 +1,243 @@
+import SwiftUI
+
+struct SettingsView: View {
+    @ObservedObject var store: ClipStore
+    @ObservedObject var watcher: ScreenshotFolderWatcher
+    var onClose: () -> Void = {}
+    @State private var launchAtLogin = LoginItemController.isEnabled
+    @State private var loginError: String?
+    @State private var selectionColor = SelectionColorPreferences.color
+    @State private var hotKey = HotKeyDefaults.load()
+    @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
+    @State private var appIconChoice = AppIconPreferences.selected
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    iconSection
+                    screenshotSection
+                    historySection
+                    hotKeySection
+                    launchSection
+                }
+                .padding(22)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("完成") {
+                    onClose()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 14)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onReceive(NotificationCenter.default.publisher(for: HotKeyDefaults.changedNotification)) { notification in
+            hotKey = notification.object as? HotKeyConfiguration ?? HotKeyDefaults.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ClearSelectionHotKeyDefaults.changedNotification)) { notification in
+            clearSelectionHotKey = notification.object as? HotKeyConfiguration ?? ClearSelectionHotKeyDefaults.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AppIconPreferences.changedNotification)) { notification in
+            appIconChoice = notification.object as? AppIconChoice ?? AppIconPreferences.selected
+        }
+    }
+
+    private var iconSection: some View {
+        settingsSection("图标") {
+            HStack(spacing: 14) {
+                ForEach(AppIconChoice.allCases) { choice in
+                    iconChoiceButton(choice)
+                }
+            }
+
+            Text("选择后会立即更新程序坞和菜单栏图标，并在下次打开时继续使用。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var screenshotSection: some View {
+        settingsSection("截图") {
+            HStack {
+                Text("截图文件夹")
+                Spacer()
+                Text(watcher.folderURL?.path ?? "未选择")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            HStack {
+                Button("选择文件夹") {
+                    watcher.chooseFolder()
+                }
+
+                Button("在访达中显示") {
+                    watcher.revealFolder()
+                }
+                .disabled(watcher.folderURL == nil)
+            }
+
+            Text("请把 macOS 截图设置里的保存位置设成同一个文件夹，并关闭右下角浮动缩略图。新截图会保留原文件，同时自动进入剪贴板。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var historySection: some View {
+        settingsSection("历史") {
+            Toggle("记录文字、文件和图片复制历史", isOn: $store.isClipboardHistoryEnabled)
+
+            VStack(alignment: .leading, spacing: 8) {
+                ColorPicker("选中记录底色", selection: Binding(
+                    get: { selectionColor },
+                    set: updateSelectionColor
+                ), supportsOpacity: false)
+
+                HStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(selectionColor)
+                        .frame(width: 46, height: 24)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.secondary.opacity(0.24), lineWidth: 1)
+                        )
+
+                    Text("记录被选中时只改变底色，文字保持黑色。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("恢复默认颜色") {
+                        SelectionColorPreferences.reset()
+                        selectionColor = SelectionColorPreferences.color
+                    }
+                }
+            }
+
+            Button("查看历史存储位置") {
+                store.revealStorage()
+            }
+
+            Button("清空历史", role: .destructive) {
+                store.clearHistory()
+            }
+
+            Text("清空历史只删除 ClipShelf 的记录，不删除截图文件夹或访达里的原文件。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var hotKeySection: some View {
+        settingsSection("快捷键") {
+            HStack {
+                Text("全局快捷键呼出")
+                Spacer()
+                HotKeyRecorderView(configuration: $hotKey)
+            }
+
+            HStack {
+                Text("取消选择记录")
+                Spacer()
+                HotKeyRecorderView(
+                    configuration: $clearSelectionHotKey,
+                    save: ClearSelectionHotKeyDefaults.save,
+                    pausesGlobalHotKey: false
+                )
+            }
+
+            Text("点击快捷键按钮后按新的组合键。按 Esc 取消录入。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var launchSection: some View {
+        settingsSection("启动") {
+            Toggle("开机自启动", isOn: Binding(
+                get: { launchAtLogin },
+                set: updateLaunchAtLogin
+            ))
+
+            if let loginError {
+                Text(loginError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+
+            content()
+        }
+    }
+
+    private func updateLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try LoginItemController.setEnabled(enabled)
+            launchAtLogin = LoginItemController.isEnabled
+            loginError = nil
+        } catch {
+            launchAtLogin = LoginItemController.isEnabled
+            loginError = error.localizedDescription
+        }
+    }
+
+    private func updateSelectionColor(_ color: Color) {
+        selectionColor = color
+        SelectionColorPreferences.color = color
+    }
+
+    private func updateAppIcon(_ choice: AppIconChoice) {
+        appIconChoice = choice
+        AppIconPreferences.selected = choice
+    }
+
+    @ViewBuilder
+    private func iconChoiceButton(_ choice: AppIconChoice) -> some View {
+        Button {
+            updateAppIcon(choice)
+        } label: {
+            VStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(appIconChoice == choice ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: appIconChoice == choice ? 2 : 1)
+
+                    if let image = choice.previewImage {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .padding(12)
+                    } else {
+                        Image(systemName: "app")
+                            .font(.system(size: 30))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 112, height: 112)
+
+                Text(choice.title)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("选择\(choice.title)")
+    }
+}
