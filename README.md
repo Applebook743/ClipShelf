@@ -63,6 +63,10 @@ ClipShelf 的历史记录保存在本机：
 
 项目没有服务器同步功能，剪贴板内容不会被上传。
 
+## 协议
+
+ClipShelf 使用 MIT License 开源。
+
 ## 注意
 
 当前脚本使用本机临时签名，适合自己使用或源码分享。若要公开分发给更多用户，建议使用 Apple Developer ID 签名并进行 notarization，否则其他用户首次打开时可能会看到 macOS 安全提示。
