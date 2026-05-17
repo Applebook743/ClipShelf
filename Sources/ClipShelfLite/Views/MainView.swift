@@ -410,10 +410,13 @@ struct MainView: View {
         guard nextIndex != currentIndex else { return }
 
         let nextID = filteredItems[nextIndex].id
+        let needsScroll = !isVisibleItem(at: nextIndex)
         focusedID = nextID
         selectedIDs = [nextID]
         anchorID = nextID
-        scrollFocusedItemIntoView(nextID, delta: delta, scrollProxy: scrollProxy)
+        if needsScroll {
+            scrollFocusedItemIntoView(nextID, delta: delta, scrollProxy: scrollProxy)
+        }
     }
 
     private func scrollFocusedItemIntoView(_ id: ClipItem.ID, delta: Int, scrollProxy: ScrollViewProxy?) {
@@ -436,10 +439,8 @@ struct MainView: View {
             return false
         }
 
-        let topMargin: CGFloat = 18
-        let bottomMargin: CGFloat = 18
-        let visibleTop = historyViewportFrame.minY + topMargin
-        let visibleBottom = historyViewportFrame.maxY - bottomMargin
+        let visibleTop = historyViewportFrame.minY
+        let visibleBottom = historyViewportFrame.maxY
 
         if rowFrame.minY >= visibleTop && rowFrame.maxY <= visibleBottom {
             return true
@@ -469,6 +470,16 @@ struct MainView: View {
 
         clipView.scroll(to: CGPoint(x: visible.origin.x, y: proposedY))
         scrollView.reflectScrolledClipView(clipView)
+    }
+
+    private func isVisibleItem(at index: Int) -> Bool {
+        guard filteredItems.indices.contains(index),
+              !historyViewportFrame.isEmpty,
+              let frame = rowFrames[filteredItems[index].id] else {
+            return false
+        }
+
+        return frame.minY >= historyViewportFrame.minY && frame.maxY <= historyViewportFrame.maxY
     }
 
     private func toggleSelectionForKeyboard(_ id: ClipItem.ID) {
