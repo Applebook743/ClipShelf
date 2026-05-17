@@ -417,11 +417,56 @@ struct MainView: View {
     }
 
     private func scrollFocusedItemIntoView(_ id: ClipItem.ID, delta: Int, scrollProxy: ScrollViewProxy?) {
-        guard let scrollProxy else { return }
+        if scrollNativeFocusedItemIntoView(id) {
+            return
+        }
 
-        let anchor: UnitPoint = delta > 0 ? .bottom : .top
-        withAnimation(.easeOut(duration: 0.12)) {
-            scrollProxy.scrollTo(id, anchor: anchor)
+        guard let scrollProxy else { return }
+        scrollProxy.scrollTo(id, anchor: .center)
+    }
+
+    private func scrollNativeFocusedItemIntoView(_ id: ClipItem.ID) -> Bool {
+        guard let scrollView = historyScrollView,
+              let rowFrame = rowFrames[id],
+              !historyViewportFrame.isEmpty else {
+            return false
+        }
+
+        let topMargin: CGFloat = 18
+        let bottomMargin: CGFloat = 18
+        let visibleTop = historyViewportFrame.minY + topMargin
+        let visibleBottom = historyViewportFrame.maxY - bottomMargin
+
+        if rowFrame.minY >= visibleTop && rowFrame.maxY <= visibleBottom {
+            return true
+        }
+
+        let delta: CGFloat
+        if rowFrame.minY < visibleTop {
+            delta = rowFrame.minY - visibleTop
+        } else {
+            delta = rowFrame.maxY - visibleBottom
+        }
+
+        guard abs(delta) > 0.5 else { return true }
+
+        scrollHistoryViewByGlobalDelta(delta, scrollView: scrollView)
+        return true
+    }
+
+    private func scrollHistoryViewByGlobalDelta(_ delta: CGFloat, scrollView: NSScrollView) {
+        guard let documentView = scrollView.documentView else { return }
+        let clipView = scrollView.contentView
+        let visible = clipView.bounds
+        let maxY = max(0, documentView.bounds.height - visible.height)
+        let sign: CGFloat = documentView.isFlipped ? 1 : -1
+        let proposedY = min(max(visible.origin.y + delta * sign, 0), maxY)
+        guard proposedY != visible.origin.y else { return }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.06
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            clipView.animator().setBoundsOrigin(CGPoint(x: visible.origin.x, y: proposedY))
         }
     }
 
