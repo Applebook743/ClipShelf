@@ -21,6 +21,8 @@ struct MainView: View {
     @State private var appIconChoice = AppIconPreferences.selected
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
     @State private var pinHotKey = PinHotKeyDefaults.load()
+    @State private var pendingKeyboardScrollID: ClipItem.ID?
+    @State private var pendingKeyboardScrollDelta = 0
 
     private var filteredItems: [ClipItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -163,6 +165,12 @@ struct MainView: View {
             }
             .onChange(of: searchText) { _ in
                 clearSelection()
+            }
+            .onChange(of: pendingKeyboardScrollID) { id in
+                guard let id, pendingKeyboardScrollDelta != 0 else { return }
+                scrollFocusedItemIntoView(id, delta: pendingKeyboardScrollDelta, scrollProxy: proxy)
+                pendingKeyboardScrollID = nil
+                pendingKeyboardScrollDelta = 0
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 clearSelection()
@@ -328,6 +336,21 @@ struct MainView: View {
                 return nil
             }
 
+            if event.keyCode == 53 {
+                if !searchText.isEmpty {
+                    clearSearchState()
+                    return nil
+                }
+            }
+
+            if (event.keyCode == 125 || event.keyCode == 126),
+               !event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.option),
+               !event.modifierFlags.contains(.control) {
+                handleKey(event)
+                return nil
+            }
+
             if event.modifierFlags.contains(.command),
                ["a", "c", "v"].contains(event.charactersIgnoringModifiers?.lowercased()) {
                 handleCommandKey(event)
@@ -356,6 +379,12 @@ struct MainView: View {
         default:
             break
         }
+    }
+
+    private func clearSearchState() {
+        searchText = ""
+        clearSelection()
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     private var focusedItem: ClipItem? {
@@ -416,6 +445,10 @@ struct MainView: View {
         anchorID = nextID
         if needsScroll {
             scrollFocusedItemIntoView(nextID, delta: delta, scrollProxy: scrollProxy)
+        }
+        if scrollProxy == nil {
+            pendingKeyboardScrollDelta = delta
+            pendingKeyboardScrollID = nextID
         }
     }
 
