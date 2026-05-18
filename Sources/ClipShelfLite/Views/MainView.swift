@@ -18,6 +18,7 @@ struct MainView: View {
     @State private var autoScrollDirection = 0
     @State private var historyScrollView: NSScrollView?
     @State private var selectionColor = SelectionColorPreferences.color
+    @State private var switchToClickedRecord = SelectionClickBehaviorPreferences.switchToClickedRecord
     @State private var commandKeyMonitor: Any?
     @State private var appIconChoice = AppIconPreferences.selected
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
@@ -91,14 +92,17 @@ struct MainView: View {
     private var historyList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(filteredItems) { item in
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
+                        let isSelected = selectedIDs.contains(item.id)
+                        let isNextSelected = index + 1 < filteredItems.count && selectedIDs.contains(filteredItems[index + 1].id)
                         ClipRow(
                             item: item,
                             store: store,
                             isFocused: focusedID == item.id,
-                            isSelected: selectedIDs.contains(item.id),
+                            isSelected: isSelected,
                             selectionColor: selectionColor,
+                            showsSeparator: index < filteredItems.count - 1 && !isSelected && !isNextSelected,
                             handleClick: { event in handleRowClick(item, event: event) },
                             handleCopy: { store.copy(actionItems(for: item)) },
                             handlePaste: { store.paste(actionItems(for: item)) }
@@ -119,6 +123,15 @@ struct MainView: View {
                         )
                     }
                 }
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(AppTheme.rowBackground)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(AppTheme.subtleBorder, lineWidth: 1)
+                )
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
             }
@@ -144,6 +157,9 @@ struct MainView: View {
                 DragSelectionCaptureView(
                     isEnabled: !showingSettings,
                     viewportFrame: historyViewportFrame,
+                    onPointerDown: { location in
+                        handleHistoryPointerDown(at: location)
+                    },
                     onDrag: { location, shouldSelect in
                         handleDragSelection(at: location, scrollProxy: proxy, shouldSelect: shouldSelect)
                     },
@@ -185,6 +201,9 @@ struct MainView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: SelectionColorPreferences.changedNotification)) { _ in
                 selectionColor = SelectionColorPreferences.color
+            }
+            .onReceive(NotificationCenter.default.publisher(for: SelectionClickBehaviorPreferences.changedNotification)) { notification in
+                switchToClickedRecord = notification.object as? Bool ?? SelectionClickBehaviorPreferences.switchToClickedRecord
             }
             .onReceive(NotificationCenter.default.publisher(for: AppIconPreferences.changedNotification)) { notification in
                 appIconChoice = notification.object as? AppIconChoice ?? AppIconPreferences.selected
@@ -329,9 +348,9 @@ struct MainView: View {
         case 125:
             moveFocus(delta: 1)
         case 49:
-            guard selectedIDs.count <= 1 else { return }
-            if let item = previewItems.first {
-                PreviewController.shared.togglePreview(selectedIDs.isEmpty ? [item] : previewItems)
+            let items = previewItems
+            if !items.isEmpty {
+                PreviewController.shared.togglePreview(items)
             }
         case 36, 76:
             if let item = focusedItem {
@@ -347,8 +366,7 @@ struct MainView: View {
     private func installCommandKeyMonitorIfNeeded() {
         guard commandKeyMonitor == nil else { return }
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard !showingSettings,
-                  event.window === NSApp.keyWindow else {
+            guard shouldHandleMainWindowKeyEvent(event) else {
                 return event
             }
 
@@ -385,6 +403,17 @@ struct MainView: View {
 
             return event
         }
+    }
+
+    private func shouldHandleMainWindowKeyEvent(_ event: NSEvent) -> Bool {
+        guard !showingSettings,
+              let window = event.window,
+              window === NSApp.keyWindow,
+              window.title == "ClipShelf" else {
+            return false
+        }
+
+        return true
     }
 
     private func removeCommandKeyMonitor() {
@@ -643,25 +672,41 @@ struct MainView: View {
     }
 
     private func handleRowClick(_ item: ClipItem, event: NSEvent?) {
-        focusedID = item.id
-
         let modifiers = event?.modifierFlags ?? []
         if modifiers.contains(.shift), let anchorID {
+            focusedID = item.id
             selectRange(from: anchorID, to: item.id)
         } else if modifiers.contains(.command) {
+            focusedID = item.id
             if selectedIDs.contains(item.id) {
                 selectedIDs.remove(item.id)
             } else {
                 selectedIDs.insert(item.id)
             }
             anchorID = item.id
-        } else if selectedIDs.contains(item.id) {
-            selectedIDs.remove(item.id)
-            anchorID = nil
+        } else if !selectedIDs.isEmpty {
+            if selectedIDs.contains(item.id), selectedIDs.count > 1 {
+                selectedIDs.remove(item.id)
+                focusedID = selectedIDs.first
+                anchorID = focusedID
+            } else if selectedIDs.contains(item.id) || !switchToClickedRecord {
+                clearSelection()
+            } else {
+                focusedID = item.id
+                selectedIDs = [item.id]
+                anchorID = item.id
+            }
         } else {
+            focusedID = item.id
             selectedIDs = [item.id]
             anchorID = item.id
         }
+    }
+
+    private func handleHistoryPointerDown(at location: CGPoint) {
+        guard !selectedIDs.isEmpty || focusedID != nil else { return }
+        guard rowID(at: location) == nil else { return }
+        clearSelection()
     }
 
     private func selectRange(from firstID: ClipItem.ID, to secondID: ClipItem.ID) {
@@ -829,7 +874,7 @@ struct MainView: View {
 
     private func rowID(at location: CGPoint) -> ClipItem.ID? {
         rowFrames
-            .filter { $0.value.minY <= location.y && location.y <= $0.value.maxY }
+            .filter { $0.value.contains(location) }
             .min { abs($0.value.midY - location.y) < abs($1.value.midY - location.y) }?
             .key
     }
@@ -882,6 +927,7 @@ private struct ClipRow: View {
     let isFocused: Bool
     let isSelected: Bool
     let selectionColor: Color
+    let showsSeparator: Bool
     let handleClick: (NSEvent?) -> Void
     let handleCopy: () -> Void
     let handlePaste: () -> Void
@@ -946,14 +992,16 @@ private struct ClipRow: View {
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .foregroundStyle(isSelected ? Color.black : Color.primary)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(rowBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(isSelected ? Color.clear : AppTheme.subtleBorder, lineWidth: 1)
-        )
+        .background(rowBackground)
+        .overlay(alignment: .bottom) {
+            if showsSeparator {
+                Rectangle()
+                    .fill(AppTheme.subtleBorder)
+                    .frame(height: 1)
+                    .padding(.leading, 76)
+                    .padding(.trailing, 12)
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture {
             handleClick(NSApp.currentEvent)
@@ -966,10 +1014,10 @@ private struct ClipRow: View {
         }
 
         if isFocused {
-            return AppTheme.rowBackground
+            return Color.clear
         }
 
-        return AppTheme.rowBackground
+        return Color.clear
     }
 
     @ViewBuilder
@@ -1211,6 +1259,7 @@ private final class KeyCaptureNSView: NSView {
 private struct DragSelectionCaptureView: NSViewRepresentable {
     let isEnabled: Bool
     let viewportFrame: CGRect
+    let onPointerDown: (CGPoint) -> Void
     let onDrag: (CGPoint, Bool) -> Void
     let onEnd: () -> Void
 
@@ -1228,6 +1277,7 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.isEnabled = isEnabled
         context.coordinator.viewportFrame = viewportFrame
+        context.coordinator.onPointerDown = onPointerDown
         context.coordinator.onDrag = onDrag
         context.coordinator.onEnd = onEnd
     }
@@ -1238,6 +1288,7 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
 
     final class Coordinator {
         var viewportFrame: CGRect = .zero
+        var onPointerDown: ((CGPoint) -> Void)?
         var onDrag: ((CGPoint, Bool) -> Void)?
         var onEnd: (() -> Void)?
         var isEnabled = true
@@ -1272,6 +1323,9 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
             case .leftMouseDown:
                 startedInViewport = viewportFrame.contains(point)
                 didDrag = false
+                if startedInViewport {
+                    onPointerDown?(point)
+                }
                 return event
             case .leftMouseDragged:
                 guard startedInViewport else { return event }

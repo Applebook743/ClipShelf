@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var launchAtLogin = LoginItemController.isEnabled
     @State private var loginError: String?
     @State private var selectionColor = SelectionColorPreferences.color
+    @State private var switchToClickedRecord = SelectionClickBehaviorPreferences.switchToClickedRecord
     @State private var hotKey = HotKeyDefaults.load()
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
     @State private var pinHotKey = PinHotKeyDefaults.load()
@@ -50,6 +51,9 @@ struct SettingsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: AppIconPreferences.changedNotification)) { notification in
             appIconChoice = notification.object as? AppIconChoice ?? AppIconPreferences.selected
+        }
+        .onReceive(NotificationCenter.default.publisher(for: SelectionClickBehaviorPreferences.changedNotification)) { notification in
+            switchToClickedRecord = notification.object as? Bool ?? SelectionClickBehaviorPreferences.switchToClickedRecord
         }
     }
 
@@ -99,6 +103,15 @@ struct SettingsView: View {
     private var historySection: some View {
         settingsSection("历史") {
             Toggle("记录文字、文件和图片复制历史", isOn: $store.isClipboardHistoryEnabled)
+
+            Toggle("已有选中时点击其它记录改选该记录", isOn: Binding(
+                get: { switchToClickedRecord },
+                set: updateSelectionClickBehavior
+            ))
+
+            Text("关闭时，已有单选或多选后点击其它记录只会取消选择；开启时会取消原选择并选中点击的那条记录。点击已选中的记录本身始终会取消选择。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 8) {
                 ColorPicker("选中记录底色", selection: Binding(
@@ -214,6 +227,11 @@ struct SettingsView: View {
     private func updateSelectionColor(_ color: Color) {
         selectionColor = color
         SelectionColorPreferences.color = color
+    }
+
+    private func updateSelectionClickBehavior(_ enabled: Bool) {
+        switchToClickedRecord = enabled
+        SelectionClickBehaviorPreferences.switchToClickedRecord = enabled
     }
 
     private func updateAppIcon(_ choice: AppIconChoice) {

@@ -39,6 +39,7 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
         panel.dataSource = self
         panel.delegate = self
         panel.reloadData()
+        startKeyMonitor()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(self)
     }
@@ -151,7 +152,7 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
 
         scrollView.documentView = imageView
         panel.contentView = scrollView
-        show(panel)
+        show(panel, firstResponder: scrollView)
     }
 
     private func showTextPreview(_ text: String, title: String) {
@@ -170,7 +171,7 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
 
         scrollView.documentView = textView
         panel.contentView = scrollView
-        show(panel)
+        show(panel, firstResponder: textView)
     }
 
     private func previewPanel(title: String, size: NSSize) -> NSPanel {
@@ -193,10 +194,13 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
         return panel
     }
 
-    private func show(_ panel: NSWindow) {
+    private func show(_ panel: NSWindow, firstResponder: NSResponder? = nil) {
         startKeyMonitor()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        if let firstResponder {
+            panel.makeFirstResponder(firstResponder)
+        }
     }
 
     private func startKeyMonitor() {
