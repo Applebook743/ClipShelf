@@ -4,7 +4,7 @@ set -euo pipefail
 APP_NAME="ClipShelf"
 BUNDLE_ID="local.codex.ClipShelf"
 MIN_SYSTEM_VERSION="13.0"
-APP_VERSION="1.1.8"
+APP_VERSION="1.1.9"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -69,5 +69,7 @@ PLIST
 xattr -cr "$APP_BUNDLE" >/dev/null 2>&1 || true
 xattr -d com.apple.FinderInfo "$APP_BUNDLE" >/dev/null 2>&1 || true
 xattr -d 'com.apple.fileprovider.fpfs#P' "$APP_BUNDLE" >/dev/null 2>&1 || true
-codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+xattr -cr "$APP_BUNDLE" >/dev/null 2>&1 || true
+codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null
+codesign --verify --deep --strict --verbose=1 "$APP_BUNDLE" >/dev/null
 echo "$APP_BUNDLE"

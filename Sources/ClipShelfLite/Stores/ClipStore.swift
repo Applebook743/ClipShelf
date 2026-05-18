@@ -184,28 +184,24 @@ final class ClipStore: ObservableObject {
         pasteboard.clearContents()
 
         if items.allSatisfy({ $0.kind == .text }) {
-            let text = items
-                .map { $0.text ?? $0.title }
-                .joined(separator: "\n")
-            pasteboard.setString(text, forType: .string)
+            pasteboard.setString(combinedText(for: items), forType: .string)
             changeCount = pasteboard.changeCount
             return
         }
 
-        if items.allSatisfy({ $0.kind == .file }) {
-            let urls = items
-                .flatMap(\.filePaths)
-                .map { NSURL(fileURLWithPath: $0) }
+        if let urls = fileURLsForMultiCopy(items) {
             pasteboard.writeObjects(urls)
             changeCount = pasteboard.changeCount
             return
         }
 
         let writableObjects = items.compactMap { pasteboardObject(for: $0) }
-        if !writableObjects.isEmpty {
-            pasteboard.writeObjects(writableObjects)
+        if !writableObjects.isEmpty, pasteboard.writeObjects(writableObjects) {
+            changeCount = pasteboard.changeCount
+            return
         }
 
+        pasteboard.setString(combinedText(for: items), forType: .string)
         changeCount = pasteboard.changeCount
     }
 
@@ -248,6 +244,45 @@ final class ClipStore: ObservableObject {
             }
             return pasteboardItem
         }
+    }
+
+    private func fileURLsForMultiCopy(_ items: [ClipItem]) -> [NSURL]? {
+        var urls: [NSURL] = []
+
+        for item in items {
+            switch item.kind {
+            case .file:
+                let paths = item.filePaths.filter { FileManager.default.fileExists(atPath: $0) }
+                guard !paths.isEmpty else { return nil }
+                urls.append(contentsOf: paths.map { NSURL(fileURLWithPath: $0) })
+            case .image:
+                guard let path = item.sourcePath,
+                      FileManager.default.fileExists(atPath: path) else {
+                    return nil
+                }
+                urls.append(NSURL(fileURLWithPath: path))
+            case .text:
+                return nil
+            }
+        }
+
+        return urls.isEmpty ? nil : urls
+    }
+
+    private func combinedText(for items: [ClipItem]) -> String {
+        items
+            .map { item in
+                switch item.kind {
+                case .text:
+                    return item.text ?? item.title
+                case .file:
+                    return item.filePaths.isEmpty ? item.title : item.filePaths.joined(separator: "\n")
+                case .image:
+                    return item.sourcePath ?? item.title
+                }
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 
     private func pngData(from image: NSImage) -> Data? {

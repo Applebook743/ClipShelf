@@ -12,6 +12,7 @@ struct MainView: View {
     @State private var isDragSelecting = false
     @State private var dragAnchorID: ClipItem.ID?
     @State private var rowFrames: [ClipItem.ID: CGRect] = [:]
+    @State private var keyboardRowFrames: [ClipItem.ID: CGRect] = [:]
     @State private var historyViewportFrame: CGRect = .zero
     @State private var autoScrollTimer: Timer?
     @State private var autoScrollDirection = 0
@@ -21,8 +22,8 @@ struct MainView: View {
     @State private var appIconChoice = AppIconPreferences.selected
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
     @State private var pinHotKey = PinHotKeyDefaults.load()
-    @State private var pendingKeyboardScrollID: ClipItem.ID?
-    @State private var pendingKeyboardScrollDelta = 0
+    @State private var pendingKeyboardRevealID: ClipItem.ID?
+    @State private var pendingKeyboardRevealDirection = 0
 
     private var filteredItems: [ClipItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -98,15 +99,22 @@ struct MainView: View {
                             isFocused: focusedID == item.id,
                             isSelected: selectedIDs.contains(item.id),
                             selectionColor: selectionColor,
-                            handleClick: { event in handleRowClick(item, event: event) }
+                            handleClick: { event in handleRowClick(item, event: event) },
+                            handleCopy: { store.copy(actionItems(for: item)) },
+                            handlePaste: { store.paste(actionItems(for: item)) }
                         )
                         .id(item.id)
                         .background(
                             GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: RowFramePreferenceKey.self,
-                                    value: [item.id: proxy.frame(in: .global)]
-                                )
+                                Color.clear
+                                    .preference(
+                                        key: RowFramePreferenceKey.self,
+                                        value: [item.id: proxy.frame(in: .global)]
+                                    )
+                                    .preference(
+                                        key: KeyboardRowFramePreferenceKey.self,
+                                        value: [item.id: proxy.frame(in: .named("historyList"))]
+                                    )
                             }
                         )
                     }
@@ -154,6 +162,9 @@ struct MainView: View {
             .onPreferenceChange(RowFramePreferenceKey.self) { frames in
                 rowFrames = frames
             }
+            .onPreferenceChange(KeyboardRowFramePreferenceKey.self) { frames in
+                keyboardRowFrames = frames
+            }
             .onPreferenceChange(HistoryViewportFramePreferenceKey.self) { frame in
                 historyViewportFrame = frame
             }
@@ -166,11 +177,8 @@ struct MainView: View {
             .onChange(of: searchText) { _ in
                 clearSelection()
             }
-            .onChange(of: pendingKeyboardScrollID) { id in
-                guard let id, pendingKeyboardScrollDelta != 0 else { return }
-                scrollFocusedItemIntoView(id, delta: pendingKeyboardScrollDelta, scrollProxy: proxy)
-                pendingKeyboardScrollID = nil
-                pendingKeyboardScrollDelta = 0
+            .onChange(of: keyboardRowFrames) { _ in
+                completePendingKeyboardRevealIfNeeded()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 clearSelection()
@@ -236,6 +244,24 @@ struct MainView: View {
                 .help("设置")
 
                 Button {
+                    copyActionItems()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .disabled(actionItems.isEmpty)
+                .help(copyActionHelp)
+
+                Button {
+                    pasteActionItems()
+                } label: {
+                    Image(systemName: "arrow.down.doc")
+                }
+                .buttonStyle(.borderless)
+                .disabled(actionItems.isEmpty)
+                .help(pasteActionHelp)
+
+                Button {
                     togglePinnedForActionItems()
                 } label: {
                     Image(systemName: "pin")
@@ -299,9 +325,9 @@ struct MainView: View {
 
         switch event.keyCode {
         case 126:
-            moveFocus(delta: -1, scrollProxy: scrollProxy)
+            moveFocus(delta: -1)
         case 125:
-            moveFocus(delta: 1, scrollProxy: scrollProxy)
+            moveFocus(delta: 1)
         case 49:
             guard selectedIDs.count <= 1 else { return }
             if let item = previewItems.first {
@@ -405,6 +431,37 @@ struct MainView: View {
         return []
     }
 
+    private func actionItems(for rowItem: ClipItem) -> [ClipItem] {
+        if selectedIDs.contains(rowItem.id) {
+            let selected = filteredItems.filter { selectedIDs.contains($0.id) }
+            if !selected.isEmpty {
+                return selected
+            }
+        }
+
+        return [rowItem]
+    }
+
+    private var copyActionHelp: String {
+        selectedIDs.count > 1 ? "复制选中的 \(selectedIDs.count) 条记录" : "复制当前记录"
+    }
+
+    private var pasteActionHelp: String {
+        selectedIDs.count > 1 ? "粘贴选中的 \(selectedIDs.count) 条记录" : "粘贴当前记录"
+    }
+
+    private func copyActionItems() {
+        let items = actionItems
+        guard !items.isEmpty else { return }
+        store.copy(items)
+    }
+
+    private func pasteActionItems() {
+        let items = actionItems
+        guard !items.isEmpty else { return }
+        store.paste(items)
+    }
+
     private func selectAllVisibleItems() {
         selectedIDs = Set(filteredItems.map(\.id))
         focusedID = filteredItems.first?.id
@@ -421,7 +478,7 @@ struct MainView: View {
         anchorID = focusedID
     }
 
-    private func moveFocus(delta: Int, scrollProxy: ScrollViewProxy? = nil) {
+    private func moveFocus(delta: Int) {
         guard !filteredItems.isEmpty else {
             focusedID = nil
             selectedIDs.removeAll()
@@ -433,63 +490,96 @@ struct MainView: View {
         if let focusedID, let index = filteredItems.firstIndex(where: { $0.id == focusedID }) {
             currentIndex = index
         } else {
-            currentIndex = delta > 0 ? -1 : filteredItems.count
+            currentIndex = initialKeyboardIndex(for: delta)
         }
         let nextIndex = min(max(currentIndex + delta, 0), filteredItems.count - 1)
         guard nextIndex != currentIndex else { return }
 
         let nextID = filteredItems[nextIndex].id
-        let needsScroll = !isVisibleItem(at: nextIndex)
         focusedID = nextID
         selectedIDs = [nextID]
         anchorID = nextID
-        if needsScroll {
-            scrollFocusedItemIntoView(nextID, delta: delta, scrollProxy: scrollProxy)
-        }
-        if scrollProxy == nil {
-            pendingKeyboardScrollDelta = delta
-            pendingKeyboardScrollID = nextID
-        }
+
+        revealKeyboardSelectionIfNeeded(nextID, direction: delta)
+        scheduleKeyboardRevealCheck(for: nextID, direction: delta)
     }
 
-    private func scrollFocusedItemIntoView(_ id: ClipItem.ID, delta: Int, scrollProxy: ScrollViewProxy?) {
-        if scrollNativeFocusedItemIntoView(id) {
+    private func initialKeyboardIndex(for delta: Int) -> Int {
+        let visibleIndices = visibleItemIndices()
+        if delta > 0 {
+            return (visibleIndices.first ?? -1) - 1
+        }
+
+        return (visibleIndices.last ?? filteredItems.count) + 1
+    }
+
+    private func revealKeyboardSelectionIfNeeded(_ id: ClipItem.ID, direction: Int) {
+        guard let scrollView = historyScrollView else { return }
+
+        if let rowFrame = keyboardRowFrames[id],
+           let delta = scrollDeltaToReveal(rowFrame, in: scrollView) {
+            scrollHistoryViewByGlobalDelta(delta, scrollView: scrollView)
             return
         }
 
-        scrollFocusedItemToEdge(id, delta: delta, scrollProxy: scrollProxy)
+        if keyboardRowFrames[id] == nil {
+            scrollHistoryViewByGlobalDelta(estimatedKeyboardScrollStep() * CGFloat(direction), scrollView: scrollView)
+        }
     }
 
-    private func scrollFocusedItemToEdge(_ id: ClipItem.ID, delta: Int, scrollProxy: ScrollViewProxy?) {
-        guard let scrollProxy else { return }
-        scrollProxy.scrollTo(id, anchor: delta > 0 ? .bottom : .top)
+    private func scheduleKeyboardRevealCheck(for id: ClipItem.ID, direction: Int) {
+        pendingKeyboardRevealID = id
+        pendingKeyboardRevealDirection = direction
+
+        DispatchQueue.main.async {
+            completePendingKeyboardRevealIfNeeded()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            completePendingKeyboardRevealIfNeeded()
+        }
     }
 
-    private func scrollNativeFocusedItemIntoView(_ id: ClipItem.ID) -> Bool {
-        guard let scrollView = historyScrollView,
-              let rowFrame = rowFrames[id],
-              !historyViewportFrame.isEmpty else {
-            return false
+    private func completePendingKeyboardRevealIfNeeded() {
+        guard let id = pendingKeyboardRevealID,
+              focusedID == id,
+              pendingKeyboardRevealDirection != 0 else {
+            pendingKeyboardRevealID = nil
+            pendingKeyboardRevealDirection = 0
+            return
         }
 
-        let visibleTop = historyViewportFrame.minY
-        let visibleBottom = historyViewportFrame.maxY
-
-        if rowFrame.minY >= visibleTop && rowFrame.maxY <= visibleBottom {
-            return true
+        if let scrollView = historyScrollView,
+           let rowFrame = keyboardRowFrames[id],
+           scrollDeltaToReveal(rowFrame, in: scrollView) == nil {
+            pendingKeyboardRevealID = nil
+            pendingKeyboardRevealDirection = 0
+            return
         }
 
-        let delta: CGFloat
+        let direction = pendingKeyboardRevealDirection
+        pendingKeyboardRevealID = nil
+        pendingKeyboardRevealDirection = 0
+        revealKeyboardSelectionIfNeeded(id, direction: direction)
+    }
+
+    private func scrollDeltaToReveal(_ rowFrame: CGRect, in scrollView: NSScrollView) -> CGFloat? {
+        let visibleHeight = scrollView.contentView.bounds.height
+        guard visibleHeight > 0 else { return nil }
+
+        let topPadding: CGFloat = 6
+        let bottomPadding: CGFloat = 18
+        let visibleTop = topPadding
+        let visibleBottom = visibleHeight - bottomPadding
+
         if rowFrame.minY < visibleTop {
-            delta = rowFrame.minY - visibleTop
-        } else {
-            delta = rowFrame.maxY - visibleBottom
+            return rowFrame.minY - visibleTop
         }
 
-        guard abs(delta) > 0.5 else { return true }
+        if rowFrame.maxY > visibleBottom {
+            return rowFrame.maxY - visibleBottom
+        }
 
-        scrollHistoryViewByGlobalDelta(delta, scrollView: scrollView)
-        return true
+        return nil
     }
 
     private func scrollHistoryViewByGlobalDelta(_ delta: CGFloat, scrollView: NSScrollView) {
@@ -505,14 +595,42 @@ struct MainView: View {
         scrollView.reflectScrolledClipView(clipView)
     }
 
-    private func isVisibleItem(at index: Int) -> Bool {
-        guard filteredItems.indices.contains(index),
-              !historyViewportFrame.isEmpty,
-              let frame = rowFrames[filteredItems[index].id] else {
-            return false
+    private func visibleItemIndices() -> [Int] {
+        guard let scrollView = historyScrollView else { return [] }
+        let visibleHeight = scrollView.contentView.bounds.height
+        guard visibleHeight > 0 else { return [] }
+
+        return filteredItems.indices.compactMap { index in
+            guard let frame = keyboardRowFrames[filteredItems[index].id],
+                  frame.maxY > 0,
+                  frame.minY < visibleHeight else {
+                return nil
+            }
+
+            return index
+        }
+    }
+
+    private func estimatedKeyboardScrollStep() -> CGFloat {
+        let visibleFrames = filteredItems
+            .compactMap { keyboardRowFrames[$0.id] }
+            .sorted { $0.minY < $1.minY }
+
+        let distances = zip(visibleFrames, visibleFrames.dropFirst())
+            .map { nextFrame, followingFrame in
+                followingFrame.minY - nextFrame.minY
+            }
+            .filter { $0 > 20 }
+
+        if let distance = distances.first {
+            return distance
         }
 
-        return frame.minY >= historyViewportFrame.minY && frame.maxY <= historyViewportFrame.maxY
+        if let height = visibleFrames.first?.height {
+            return height + 4
+        }
+
+        return 86
     }
 
     private func toggleSelectionForKeyboard(_ id: ClipItem.ID) {
@@ -765,6 +883,8 @@ private struct ClipRow: View {
     let isSelected: Bool
     let selectionColor: Color
     let handleClick: (NSEvent?) -> Void
+    let handleCopy: () -> Void
+    let handlePaste: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -799,20 +919,20 @@ private struct ClipRow: View {
             .delayedTooltip(item.isPinned ? "取消置顶" : "置顶")
 
             Button {
-                store.copy(item)
+                handleCopy()
             } label: {
                 Image(systemName: "doc.on.doc")
             }
             .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
-            .delayedTooltip("复制")
+            .delayedTooltip(isSelected ? "复制选中的记录" : "复制")
 
             Button {
-                store.paste(item)
+                handlePaste()
             } label: {
                 Image(systemName: "arrow.down.doc")
             }
             .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
-            .delayedTooltip("粘贴")
+            .delayedTooltip(isSelected ? "粘贴选中的记录" : "粘贴")
 
             Button(role: .destructive) {
                 store.remove(item)
@@ -978,6 +1098,14 @@ private struct DelayedTooltipModifier: ViewModifier {
 }
 
 private struct RowFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [ClipItem.ID: CGRect] = [:]
+
+    static func reduce(value: inout [ClipItem.ID: CGRect], nextValue: () -> [ClipItem.ID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct KeyboardRowFramePreferenceKey: PreferenceKey {
     static var defaultValue: [ClipItem.ID: CGRect] = [:]
 
     static func reduce(value: inout [ClipItem.ID: CGRect], nextValue: () -> [ClipItem.ID: CGRect]) {

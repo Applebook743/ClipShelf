@@ -10,6 +10,8 @@ ZIP_PATH="$RELEASE_DIR/${APP_NAME}.zip"
 rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR"
 
+xattr -cr "$APP_BUNDLE" >/dev/null 2>&1 || true
+codesign --verify --deep --strict --verbose=1 "$APP_BUNDLE" >/dev/null
 ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
 
 echo "$ZIP_PATH"
