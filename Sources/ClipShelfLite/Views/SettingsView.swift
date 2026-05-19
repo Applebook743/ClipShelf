@@ -8,6 +8,9 @@ struct SettingsView: View {
     @State private var loginError: String?
     @State private var selectionColor = SelectionColorPreferences.color
     @State private var switchToClickedRecord = SelectionClickBehaviorPreferences.switchToClickedRecord
+    @State private var multiSelectionClickSelectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickSelectedBehavior
+    @State private var multiSelectionClickUnselectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickUnselectedBehavior
+    @State private var clickRecoveryDuration = DragSelectionPreferences.clickRecoveryDuration
     @State private var hotKey = HotKeyDefaults.load()
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
     @State private var pinHotKey = PinHotKeyDefaults.load()
@@ -54,6 +57,11 @@ struct SettingsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: SelectionClickBehaviorPreferences.changedNotification)) { notification in
             switchToClickedRecord = notification.object as? Bool ?? SelectionClickBehaviorPreferences.switchToClickedRecord
+            multiSelectionClickSelectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickSelectedBehavior
+            multiSelectionClickUnselectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickUnselectedBehavior
+        }
+        .onReceive(NotificationCenter.default.publisher(for: DragSelectionPreferences.changedNotification)) { notification in
+            clickRecoveryDuration = notification.object as? TimeInterval ?? DragSelectionPreferences.clickRecoveryDuration
         }
     }
 
@@ -104,14 +112,67 @@ struct SettingsView: View {
         settingsSection("历史") {
             Toggle("记录文字、文件和图片复制历史", isOn: $store.isClipboardHistoryEnabled)
 
-            Toggle("已有选中时点击其它记录改选该记录", isOn: Binding(
+            Toggle("单选后点击其它记录改选该记录", isOn: Binding(
                 get: { switchToClickedRecord },
                 set: updateSelectionClickBehavior
             ))
 
-            Text("关闭时，已有单选或多选后点击其它记录只会取消选择；开启时会取消原选择并选中点击的那条记录。点击已选中的记录本身始终会取消选择。")
+            HStack {
+                Text("多选后点击已选记录")
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { multiSelectionClickSelectedBehavior },
+                    set: updateMultiSelectionClickSelectedBehavior
+                )) {
+                    ForEach(MultiSelectionClickSelectedBehavior.allCases) { behavior in
+                        Text(behavior.title).tag(behavior)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            HStack {
+                Text("多选后点击未选记录")
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { multiSelectionClickUnselectedBehavior },
+                    set: updateMultiSelectionClickUnselectedBehavior
+                )) {
+                    ForEach(MultiSelectionClickUnselectedBehavior.allCases) { behavior in
+                        Text(behavior.title).tag(behavior)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            Text("单选点击自身会取消选择。多选点击已选记录和未选记录可分别设置。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("点击恢复期")
+                    Spacer()
+                    Text(String(format: "%.1f 秒", clickRecoveryDuration))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(
+                    value: Binding(
+                        get: { clickRecoveryDuration },
+                        set: updateClickRecoveryDuration
+                    ),
+                    in: 0...1,
+                    step: 0.1
+                )
+
+                Text("三指拖移松手后，短时间内的下一次点击会走恢复逻辑。设为 0 秒时几乎直接使用普通点击逻辑。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 ColorPicker("选中记录底色", selection: Binding(
@@ -232,6 +293,21 @@ struct SettingsView: View {
     private func updateSelectionClickBehavior(_ enabled: Bool) {
         switchToClickedRecord = enabled
         SelectionClickBehaviorPreferences.switchToClickedRecord = enabled
+    }
+
+    private func updateMultiSelectionClickSelectedBehavior(_ behavior: MultiSelectionClickSelectedBehavior) {
+        multiSelectionClickSelectedBehavior = behavior
+        SelectionClickBehaviorPreferences.multiSelectionClickSelectedBehavior = behavior
+    }
+
+    private func updateMultiSelectionClickUnselectedBehavior(_ behavior: MultiSelectionClickUnselectedBehavior) {
+        multiSelectionClickUnselectedBehavior = behavior
+        SelectionClickBehaviorPreferences.multiSelectionClickUnselectedBehavior = behavior
+    }
+
+    private func updateClickRecoveryDuration(_ duration: TimeInterval) {
+        clickRecoveryDuration = duration
+        DragSelectionPreferences.clickRecoveryDuration = duration
     }
 
     private func updateAppIcon(_ choice: AppIconChoice) {

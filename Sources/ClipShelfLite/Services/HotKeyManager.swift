@@ -14,6 +14,10 @@ final class HotKeyManager {
     func register(configuration: HotKeyConfiguration = HotKeyDefaults.load()) {
         unregister()
         guard configuration.isValid else { return }
+        guard !configuration.conflictsWithSystemWindowSwitching else {
+            NSLog("ClipShelf skipped a global hot key that conflicts with macOS window or desktop switching.")
+            return
+        }
 
         let hotKeyID = EventHotKeyID(signature: fourCharCode("CLIP"), id: 1)
         let status = RegisterEventHotKey(

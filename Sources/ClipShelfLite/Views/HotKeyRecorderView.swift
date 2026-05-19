@@ -59,6 +59,12 @@ struct HotKeyRecorderView: View {
             keyCode: UInt32(event.keyCode),
             modifiers: modifiers
         )
+        if pausesGlobalHotKey, newConfiguration.conflictsWithSystemWindowSwitching {
+            NSSound.beep()
+            stopRecording()
+            return
+        }
+
         configuration = newConfiguration
         save(newConfiguration)
         stopRecording()

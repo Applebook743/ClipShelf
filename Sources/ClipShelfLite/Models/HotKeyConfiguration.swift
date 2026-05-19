@@ -10,6 +10,19 @@ struct HotKeyConfiguration: Codable, Equatable {
         modifiers > 0
     }
 
+    var conflictsWithSystemWindowSwitching: Bool {
+        guard modifiers == UInt32(controlKey) else { return false }
+
+        switch Int(keyCode) {
+        case kVK_ANSI_0, kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4,
+             kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9,
+             kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow:
+            return true
+        default:
+            return false
+        }
+    }
+
     var displayText: String {
         var parts: [String] = []
         if modifiers & UInt32(cmdKey) != 0 { parts.append("⌘") }

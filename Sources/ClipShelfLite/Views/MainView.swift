@@ -11,20 +11,23 @@ struct MainView: View {
     @State private var anchorID: ClipItem.ID?
     @State private var isDragSelecting = false
     @State private var dragAnchorID: ClipItem.ID?
-    @State private var rowFrames: [ClipItem.ID: CGRect] = [:]
-    @State private var keyboardRowFrames: [ClipItem.ID: CGRect] = [:]
-    @State private var historyViewportFrame: CGRect = .zero
     @State private var autoScrollTimer: Timer?
     @State private var autoScrollDirection = 0
     @State private var historyScrollView: NSScrollView?
     @State private var selectionColor = SelectionColorPreferences.color
     @State private var switchToClickedRecord = SelectionClickBehaviorPreferences.switchToClickedRecord
+    @State private var multiSelectionClickSelectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickSelectedBehavior
+    @State private var multiSelectionClickUnselectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickUnselectedBehavior
+    @State private var postDragClickRecoveryDuration = DragSelectionPreferences.clickRecoveryDuration
     @State private var commandKeyMonitor: Any?
     @State private var appIconChoice = AppIconPreferences.selected
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
     @State private var pinHotKey = PinHotKeyDefaults.load()
-    @State private var pendingKeyboardRevealID: ClipItem.ID?
-    @State private var pendingKeyboardRevealDirection = 0
+    @State private var suppressPasteUntil = Date.distantPast
+    @State private var suppressRowTapUntil = Date.distantPast
+    private let historyRowHeight: CGFloat = 74
+    private let historyListHorizontalInset: CGFloat = 10
+    private let historyListVerticalInset: CGFloat = 8
 
     private var filteredItems: [ClipItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,22 +108,9 @@ struct MainView: View {
                             showsSeparator: index < filteredItems.count - 1 && !isSelected && !isNextSelected,
                             handleClick: { event in handleRowClick(item, event: event) },
                             handleCopy: { store.copy(actionItems(for: item)) },
-                            handlePaste: { store.paste(actionItems(for: item)) }
+                            handlePaste: { pasteRowItems(actionItems(for: item)) }
                         )
                         .id(item.id)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .preference(
-                                        key: RowFramePreferenceKey.self,
-                                        value: [item.id: proxy.frame(in: .global)]
-                                    )
-                                    .preference(
-                                        key: KeyboardRowFramePreferenceKey.self,
-                                        value: [item.id: proxy.frame(in: .named("historyList"))]
-                                    )
-                            }
-                        )
                     }
                 }
                 .background(
@@ -142,48 +132,30 @@ struct MainView: View {
                     historyScrollView = scrollView
                 }
             )
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: HistoryViewportFramePreferenceKey.self,
-                        value: proxy.frame(in: .global)
-                    )
-                }
-            )
             .background(KeyboardCaptureView { event in
                 handleKey(event, scrollProxy: proxy)
             })
             .background(
                 DragSelectionCaptureView(
                     isEnabled: !showingSettings,
-                    viewportFrame: historyViewportFrame,
+                    clickRecoveryDuration: postDragClickRecoveryDuration,
                     onPointerDown: { location in
                         handleHistoryPointerDown(at: location)
+                    },
+                    onSmallDragClick: { location, event in
+                        handleHistorySmallDragClick(at: location, event: event)
                     },
                     onDrag: { location, shouldSelect in
                         handleDragSelection(at: location, scrollProxy: proxy, shouldSelect: shouldSelect)
                     },
                     onEnd: {
                         endDragSelection()
+                    },
+                    onCancel: {
+                        endDragSelection()
                     }
                 )
             )
-            .gesture(
-                DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                    .onChanged { value in
-                        handleDragSelection(at: value.location, scrollProxy: proxy, shouldSelect: true)
-                    }
-                    .onEnded { _ in endDragSelection() }
-            )
-            .onPreferenceChange(RowFramePreferenceKey.self) { frames in
-                rowFrames = frames
-            }
-            .onPreferenceChange(KeyboardRowFramePreferenceKey.self) { frames in
-                keyboardRowFrames = frames
-            }
-            .onPreferenceChange(HistoryViewportFramePreferenceKey.self) { frame in
-                historyViewportFrame = frame
-            }
             .onChange(of: store.items.first?.id) { newID in
                 guard let newID else { return }
                 withAnimation(.easeOut(duration: 0.18)) {
@@ -193,9 +165,6 @@ struct MainView: View {
             .onChange(of: searchText) { _ in
                 clearSelection()
             }
-            .onChange(of: keyboardRowFrames) { _ in
-                completePendingKeyboardRevealIfNeeded()
-            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 clearSelection()
             }
@@ -204,6 +173,14 @@ struct MainView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: SelectionClickBehaviorPreferences.changedNotification)) { notification in
                 switchToClickedRecord = notification.object as? Bool ?? SelectionClickBehaviorPreferences.switchToClickedRecord
+                multiSelectionClickSelectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickSelectedBehavior
+                multiSelectionClickUnselectedBehavior = SelectionClickBehaviorPreferences.multiSelectionClickUnselectedBehavior
+            }
+            .onReceive(NotificationCenter.default.publisher(for: DragSelectionPreferences.changedNotification)) { notification in
+                postDragClickRecoveryDuration = notification.object as? TimeInterval ?? DragSelectionPreferences.clickRecoveryDuration
+                if postDragClickRecoveryDuration <= 0 {
+                    suppressRowTapUntil = .distantPast
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: AppIconPreferences.changedNotification)) { notification in
                 appIconChoice = notification.object as? AppIconChoice ?? AppIconPreferences.selected
@@ -220,18 +197,15 @@ struct MainView: View {
     private var toolbar: some View {
         VStack(spacing: 12) {
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(AppTheme.iconBackground)
+                Group {
                     if let image = appIconChoice.previewImage {
                         Image(nsImage: image)
                             .resizable()
                             .scaledToFit()
-                            .padding(5)
                     } else {
                         Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(AppTheme.iconForeground)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .frame(width: 36, height: 36)
@@ -491,6 +465,11 @@ struct MainView: View {
         store.paste(items)
     }
 
+    private func pasteRowItems(_ items: [ClipItem]) {
+        guard Date() >= suppressPasteUntil else { return }
+        store.paste(items)
+    }
+
     private func selectAllVisibleItems() {
         selectedIDs = Set(filteredItems.map(\.id))
         focusedID = filteredItems.first?.id
@@ -530,7 +509,6 @@ struct MainView: View {
         anchorID = nextID
 
         revealKeyboardSelectionIfNeeded(nextID, direction: delta)
-        scheduleKeyboardRevealCheck(for: nextID, direction: delta)
     }
 
     private func initialKeyboardIndex(for delta: Int) -> Int {
@@ -543,52 +521,13 @@ struct MainView: View {
     }
 
     private func revealKeyboardSelectionIfNeeded(_ id: ClipItem.ID, direction: Int) {
-        guard let scrollView = historyScrollView else { return }
+        guard let scrollView = historyScrollView,
+              let index = filteredItems.firstIndex(where: { $0.id == id }) else { return }
 
-        if let rowFrame = keyboardRowFrames[id],
+        if let rowFrame = rowFrameInViewport(at: index, in: scrollView),
            let delta = scrollDeltaToReveal(rowFrame, in: scrollView) {
             scrollHistoryViewByGlobalDelta(delta, scrollView: scrollView)
-            return
         }
-
-        if keyboardRowFrames[id] == nil {
-            scrollHistoryViewByGlobalDelta(estimatedKeyboardScrollStep() * CGFloat(direction), scrollView: scrollView)
-        }
-    }
-
-    private func scheduleKeyboardRevealCheck(for id: ClipItem.ID, direction: Int) {
-        pendingKeyboardRevealID = id
-        pendingKeyboardRevealDirection = direction
-
-        DispatchQueue.main.async {
-            completePendingKeyboardRevealIfNeeded()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-            completePendingKeyboardRevealIfNeeded()
-        }
-    }
-
-    private func completePendingKeyboardRevealIfNeeded() {
-        guard let id = pendingKeyboardRevealID,
-              focusedID == id,
-              pendingKeyboardRevealDirection != 0 else {
-            pendingKeyboardRevealID = nil
-            pendingKeyboardRevealDirection = 0
-            return
-        }
-
-        if let scrollView = historyScrollView,
-           let rowFrame = keyboardRowFrames[id],
-           scrollDeltaToReveal(rowFrame, in: scrollView) == nil {
-            pendingKeyboardRevealID = nil
-            pendingKeyboardRevealDirection = 0
-            return
-        }
-
-        let direction = pendingKeyboardRevealDirection
-        pendingKeyboardRevealID = nil
-        pendingKeyboardRevealDirection = 0
-        revealKeyboardSelectionIfNeeded(id, direction: direction)
     }
 
     private func scrollDeltaToReveal(_ rowFrame: CGRect, in scrollView: NSScrollView) -> CGFloat? {
@@ -611,6 +550,33 @@ struct MainView: View {
         return nil
     }
 
+    private func rowFrameInViewport(at index: Int, in scrollView: NSScrollView) -> CGRect? {
+        guard filteredItems.indices.contains(index),
+              let visibleRange = visibleContentRange(in: scrollView) else { return nil }
+
+        let rowMinY = historyListVerticalInset + CGFloat(index) * historyRowHeight
+        return CGRect(
+            x: 0,
+            y: rowMinY - visibleRange.lowerBound,
+            width: scrollView.contentView.bounds.width,
+            height: historyRowHeight
+        )
+    }
+
+    private func visibleContentRange(in scrollView: NSScrollView) -> ClosedRange<CGFloat>? {
+        guard let documentView = scrollView.documentView else { return nil }
+
+        let visible = scrollView.contentView.bounds
+        guard visible.height > 0 else { return nil }
+
+        if documentView.isFlipped {
+            return visible.minY...visible.maxY
+        }
+
+        let documentHeight = documentView.bounds.height
+        return max(0, documentHeight - visible.maxY)...max(0, documentHeight - visible.minY)
+    }
+
     private func scrollHistoryViewByGlobalDelta(_ delta: CGFloat, scrollView: NSScrollView) {
         guard let documentView = scrollView.documentView else { return }
         let clipView = scrollView.contentView
@@ -625,41 +591,15 @@ struct MainView: View {
     }
 
     private func visibleItemIndices() -> [Int] {
-        guard let scrollView = historyScrollView else { return [] }
-        let visibleHeight = scrollView.contentView.bounds.height
-        guard visibleHeight > 0 else { return [] }
+        guard let scrollView = historyScrollView,
+              !filteredItems.isEmpty,
+              let range = visibleContentRange(in: scrollView) else { return [] }
 
-        return filteredItems.indices.compactMap { index in
-            guard let frame = keyboardRowFrames[filteredItems[index].id],
-                  frame.maxY > 0,
-                  frame.minY < visibleHeight else {
-                return nil
-            }
+        let first = max(0, Int(floor((range.lowerBound - historyListVerticalInset) / historyRowHeight)))
+        let last = min(filteredItems.count - 1, Int(floor((range.upperBound - historyListVerticalInset) / historyRowHeight)))
+        guard first <= last else { return [] }
 
-            return index
-        }
-    }
-
-    private func estimatedKeyboardScrollStep() -> CGFloat {
-        let visibleFrames = filteredItems
-            .compactMap { keyboardRowFrames[$0.id] }
-            .sorted { $0.minY < $1.minY }
-
-        let distances = zip(visibleFrames, visibleFrames.dropFirst())
-            .map { nextFrame, followingFrame in
-                followingFrame.minY - nextFrame.minY
-            }
-            .filter { $0 > 20 }
-
-        if let distance = distances.first {
-            return distance
-        }
-
-        if let height = visibleFrames.first?.height {
-            return height + 4
-        }
-
-        return 86
+        return Array(first...last)
     }
 
     private func toggleSelectionForKeyboard(_ id: ClipItem.ID) {
@@ -672,6 +612,8 @@ struct MainView: View {
     }
 
     private func handleRowClick(_ item: ClipItem, event: NSEvent?) {
+        guard Date() >= suppressRowTapUntil else { return }
+
         let modifiers = event?.modifierFlags ?? []
         if modifiers.contains(.shift), let anchorID {
             focusedID = item.id
@@ -684,29 +626,83 @@ struct MainView: View {
                 selectedIDs.insert(item.id)
             }
             anchorID = item.id
-        } else if !selectedIDs.isEmpty {
-            if selectedIDs.contains(item.id), selectedIDs.count > 1 {
-                selectedIDs.remove(item.id)
-                focusedID = selectedIDs.first
-                anchorID = focusedID
-            } else if selectedIDs.contains(item.id) || !switchToClickedRecord {
+        } else if selectedIDs.count > 1 {
+            handleMultiSelectionClick(on: item)
+        } else if selectedIDs.count == 1 {
+            handleSingleSelectionClick(on: item)
+        } else {
+            collapseSelection(to: item)
+        }
+    }
+
+    private func handleSingleSelectionClick(on item: ClipItem) {
+        if selectedIDs.contains(item.id) || !switchToClickedRecord {
+            clearSelection()
+        } else {
+            collapseSelection(to: item)
+        }
+    }
+
+    private func handleMultiSelectionClick(on item: ClipItem) {
+        if selectedIDs.contains(item.id) {
+            switch multiSelectionClickSelectedBehavior {
+            case .collapseToClicked:
+                collapseSelection(to: item)
+            case .clearAll:
                 clearSelection()
-            } else {
-                focusedID = item.id
-                selectedIDs = [item.id]
-                anchorID = item.id
+            case .removeClicked:
+                removeClickedItemFromMultiSelection(item)
             }
         } else {
-            focusedID = item.id
-            selectedIDs = [item.id]
-            anchorID = item.id
+            switch multiSelectionClickUnselectedBehavior {
+            case .collapseToClicked:
+                collapseSelection(to: item)
+            case .clearAll:
+                clearSelection()
+            }
         }
+    }
+
+    private func removeClickedItemFromMultiSelection(_ item: ClipItem) {
+        selectedIDs.remove(item.id)
+        guard selectedIDs.count > 1 else {
+            clearSelection()
+            return
+        }
+
+        focusedID = selectedIDs.first
+        anchorID = focusedID
+    }
+
+    private func collapseSelection(to item: ClipItem) {
+        focusedID = item.id
+        selectedIDs = [item.id]
+        anchorID = item.id
     }
 
     private func handleHistoryPointerDown(at location: CGPoint) {
         guard !selectedIDs.isEmpty || focusedID != nil else { return }
         guard rowID(at: location) == nil else { return }
         clearSelection()
+    }
+
+    private func handleHistorySmallDragClick(at location: CGPoint, event: NSEvent?) {
+        guard let id = rowID(at: location),
+              let item = filteredItems.first(where: { $0.id == id }) else { return }
+        if postDragClickRecoveryDuration > 0 {
+            suppressRowTapUntil = Date().addingTimeInterval(0.18)
+        }
+        collapseSelectionFromRecoveredClick(to: item)
+    }
+
+    private func collapseSelectionFromRecoveredClick(to item: ClipItem) {
+        if selectedIDs.count > 1 {
+            handleMultiSelectionClick(on: item)
+        } else if selectedIDs.count == 1 {
+            handleSingleSelectionClick(on: item)
+        } else {
+            collapseSelection(to: item)
+        }
     }
 
     private func selectRange(from firstID: ClipItem.ID, to secondID: ClipItem.ID) {
@@ -749,13 +745,16 @@ struct MainView: View {
     }
 
     private func endDragSelection() {
+        if isDragSelecting {
+            suppressPasteUntil = Date().addingTimeInterval(0.45)
+        }
         isDragSelecting = false
         dragAnchorID = nil
         stopAutoScroll()
     }
 
     private func handleDragSelection(at location: CGPoint, scrollProxy: ScrollViewProxy, shouldSelect: Bool) {
-        updateAutoScroll(for: location, scrollProxy: scrollProxy)
+        stopAutoScroll()
         guard shouldSelect else { return }
         guard let id = rowID(at: location) ?? edgeRowID(for: location) else { return }
 
@@ -777,13 +776,13 @@ struct MainView: View {
     }
 
     private func autoScrollDirection(for location: CGPoint) -> Int {
-        if !historyViewportFrame.isEmpty {
-            let edgeDistance: CGFloat = 120
-            if location.y < historyViewportFrame.minY + edgeDistance {
+        if let viewportSize = historyViewportSize {
+            let edgeDistance = min(CGFloat(120), viewportSize.height * 0.28)
+            if location.y < edgeDistance {
                 return -1
             }
 
-            if location.y > historyViewportFrame.maxY - edgeDistance {
+            if location.y > viewportSize.height - edgeDistance {
                 return 1
             }
         }
@@ -873,36 +872,51 @@ struct MainView: View {
     }
 
     private func rowID(at location: CGPoint) -> ClipItem.ID? {
-        rowFrames
-            .filter { $0.value.contains(location) }
-            .min { abs($0.value.midY - location.y) < abs($1.value.midY - location.y) }?
-            .key
+        rowID(atViewportPoint: location)
+    }
+
+    private func rowID(atViewportPoint location: CGPoint) -> ClipItem.ID? {
+        guard let scrollView = historyScrollView,
+              let visibleRange = visibleContentRange(in: scrollView) else { return nil }
+        let viewportSize = scrollView.contentView.bounds.size
+        guard viewportSize.width > 0,
+              viewportSize.height > 0,
+              location.x >= historyListHorizontalInset,
+              location.x <= viewportSize.width - historyListHorizontalInset,
+              location.y >= 0,
+              location.y <= viewportSize.height else { return nil }
+
+        let yInList = visibleRange.lowerBound + location.y - historyListVerticalInset
+        guard yInList >= 0 else { return nil }
+
+        let index = Int(floor(yInList / historyRowHeight))
+        guard filteredItems.indices.contains(index) else { return nil }
+        return filteredItems[index].id
     }
 
     private func edgeRowID(for location: CGPoint) -> ClipItem.ID? {
-        if !historyViewportFrame.isEmpty, location.y < historyViewportFrame.minY {
-            return rowFrames.min { $0.value.minY < $1.value.minY }?.key
+        guard let viewportSize = historyViewportSize else { return nil }
+
+        if location.y < 0 {
+            return visibleItemIndices().first.map { filteredItems[$0].id } ?? filteredItems.first?.id
         }
 
-        if !historyViewportFrame.isEmpty, location.y > historyViewportFrame.maxY {
-            return rowFrames.max { $0.value.maxY < $1.value.maxY }?.key
+        if location.y > viewportSize.height {
+            return visibleItemIndices().last.map { filteredItems[$0].id } ?? filteredItems.last?.id
         }
 
         return nil
     }
 
+    private var historyViewportSize: CGSize? {
+        guard let scrollView = historyScrollView else { return nil }
+        let size = scrollView.contentView.bounds.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        return size
+    }
+
     private func visibleItemIDs() -> [ClipItem.ID] {
-        guard !historyViewportFrame.isEmpty else { return [] }
-
-        return filteredItems.compactMap { item in
-            guard let frame = rowFrames[item.id],
-                  frame.maxY >= historyViewportFrame.minY,
-                  frame.minY <= historyViewportFrame.maxY else {
-                return nil
-            }
-
-            return item.id
-        }
+        visibleItemIndices().map { filteredItems[$0].id }
     }
 
     private var emptyView: some View {
@@ -1145,45 +1159,35 @@ private struct DelayedTooltipModifier: ViewModifier {
     }
 }
 
-private struct RowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [ClipItem.ID: CGRect] = [:]
-
-    static func reduce(value: inout [ClipItem.ID: CGRect], nextValue: () -> [ClipItem.ID: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
-}
-
-private struct KeyboardRowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [ClipItem.ID: CGRect] = [:]
-
-    static func reduce(value: inout [ClipItem.ID: CGRect], nextValue: () -> [ClipItem.ID: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
-}
-
-private struct HistoryViewportFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
-    }
-}
-
 private struct ScrollViewResolver: NSViewRepresentable {
     let onResolve: (NSScrollView?) -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
-            onResolve(resolveScrollView(from: view))
+            let scrollView = resolveScrollView(from: view)
+            configure(scrollView)
+            onResolve(scrollView)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            onResolve(resolveScrollView(from: nsView))
+            let scrollView = resolveScrollView(from: nsView)
+            configure(scrollView)
+            onResolve(scrollView)
         }
+    }
+
+    private func configure(_ scrollView: NSScrollView?) {
+        guard let scrollView else { return }
+        scrollView.usesPredominantAxisScrolling = true
+        scrollView.verticalScrollElasticity = .automatic
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.scrollerStyle = .overlay
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
     }
 
     private func resolveScrollView(from view: NSView) -> NSScrollView? {
@@ -1258,10 +1262,12 @@ private final class KeyCaptureNSView: NSView {
 
 private struct DragSelectionCaptureView: NSViewRepresentable {
     let isEnabled: Bool
-    let viewportFrame: CGRect
+    let clickRecoveryDuration: TimeInterval
     let onPointerDown: (CGPoint) -> Void
+    let onSmallDragClick: (CGPoint, NSEvent?) -> Void
     let onDrag: (CGPoint, Bool) -> Void
     let onEnd: () -> Void
+    let onCancel: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1276,10 +1282,12 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.isEnabled = isEnabled
-        context.coordinator.viewportFrame = viewportFrame
+        context.coordinator.setClickRecoveryDuration(clickRecoveryDuration)
         context.coordinator.onPointerDown = onPointerDown
+        context.coordinator.onSmallDragClick = onSmallDragClick
         context.coordinator.onDrag = onDrag
         context.coordinator.onEnd = onEnd
+        context.coordinator.onCancel = onCancel
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -1287,22 +1295,46 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
     }
 
     final class Coordinator {
-        var viewportFrame: CGRect = .zero
         var onPointerDown: ((CGPoint) -> Void)?
+        var onSmallDragClick: ((CGPoint, NSEvent?) -> Void)?
         var onDrag: ((CGPoint, Bool) -> Void)?
         var onEnd: (() -> Void)?
+        var onCancel: (() -> Void)?
         var isEnabled = true
+        var clickRecoveryDuration: TimeInterval = DragSelectionPreferences.clickRecoveryDuration
         weak var view: NSView?
 
         private var monitor: Any?
+        private var observers: [NSObjectProtocol] = []
         private var startedInViewport = false
         private var didDrag = false
+        private var pointerDownPoint: CGPoint?
+        private var hadSmallDrag = false
+        private var postDragClickRecoveryUntil = Date.distantPast
+        private var pendingRecoveredClickPoint: CGPoint?
+        private let dragActivationDistance: CGFloat = 6
 
         func install() {
             guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .scrollWheel]) { [weak self] event in
                 self?.handle(event) ?? event
             }
+            observers = [
+                NotificationCenter.default.addObserver(
+                    forName: NSApplication.didResignActiveNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.cancelDrag()
+                },
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didResignKeyNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.cancelDrag()
+                }
+            ]
         }
 
         func uninstall() {
@@ -1310,45 +1342,178 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
                 self.monitor = nil
             }
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers.removeAll()
+            cancelDrag()
+        }
+
+        func setClickRecoveryDuration(_ duration: TimeInterval) {
+            clickRecoveryDuration = duration
+            if duration <= 0 {
+                clearPostDragClickRecovery()
+            }
         }
 
         private func handle(_ event: NSEvent) -> NSEvent? {
-            guard isEnabled,
-                  event.window === NSApp.keyWindow,
-                  let point = swiftUIGlobalPoint(from: event) else {
+            guard isEnabled else {
+                cancelDrag()
+                return event
+            }
+
+            guard event.window === NSApp.keyWindow else {
+                cancelDrag()
+                return event
+            }
+
+            guard let point = localTopLeftPoint(from: event) else {
+                cancelDrag()
                 return event
             }
 
             switch event.type {
             case .leftMouseDown:
-                startedInViewport = viewportFrame.contains(point)
+                if isRecoveringPostDragClick {
+                    pendingRecoveredClickPoint = isPointInsideViewport(point) ? point : nil
+                    if pendingRecoveredClickPoint != nil {
+                        onPointerDown?(point)
+                        return nil
+                    }
+                    clearPostDragClickRecovery()
+                }
+
+                startedInViewport = isPointInsideViewport(point)
                 didDrag = false
+                hadSmallDrag = false
+                pointerDownPoint = startedInViewport ? point : nil
                 if startedInViewport {
                     onPointerDown?(point)
                 }
                 return event
             case .leftMouseDragged:
+                if isRecoveringPostDragClick {
+                    pendingRecoveredClickPoint = isPointInsideViewport(point) ? point : pendingRecoveredClickPoint
+                    return nil
+                }
+
+                if !startedInViewport {
+                    startedInViewport = isPointInsideViewport(point)
+                    didDrag = false
+                    hadSmallDrag = false
+                    pointerDownPoint = startedInViewport ? point : nil
+                    if startedInViewport {
+                        onPointerDown?(point)
+                    }
+                }
                 guard startedInViewport else { return event }
+                guard shouldActivateDrag(at: point) else {
+                    hadSmallDrag = true
+                    return nil
+                }
                 didDrag = true
-                onDrag?(point, false)
-                return event
+                onDrag?(point, true)
+                return nil
             case .leftMouseUp:
+                if isRecoveringPostDragClick {
+                    let recoveredPoint = isPointInsideViewport(point) ? point : pendingRecoveredClickPoint
+                    clearPostDragClickRecovery()
+                    if let recoveredPoint {
+                        onSmallDragClick?(recoveredPoint, event)
+                        return nil
+                    }
+                    return event
+                }
+
                 guard startedInViewport else { return event }
-                startedInViewport = false
-                onEnd?()
-                return event
+                let shouldConsumeMouseUp = didDrag
+                let shouldReplaySmallDragClick = hadSmallDrag && !didDrag
+                finishDrag()
+                if shouldReplaySmallDragClick {
+                    onSmallDragClick?(point, event)
+                    return nil
+                }
+                return shouldConsumeMouseUp ? nil : event
+            case .scrollWheel:
+                return startedInViewport || didDrag ? nil : event
             default:
                 return event
             }
         }
 
-        private func swiftUIGlobalPoint(from event: NSEvent) -> CGPoint? {
-            guard let view else { return nil }
-            let pointInView = view.convert(event.locationInWindow, from: nil)
+        private func localTopLeftPoint(from event: NSEvent) -> CGPoint? {
+            guard let viewport = viewportView() else { return nil }
+            let pointInView = viewport.convert(event.locationInWindow, from: nil)
             return CGPoint(
-                x: viewportFrame.minX + pointInView.x,
-                y: viewportFrame.maxY - pointInView.y
+                x: pointInView.x,
+                y: viewport.isFlipped ? pointInView.y : viewport.bounds.height - pointInView.y
             )
+        }
+
+        private func isPointInsideViewport(_ point: CGPoint) -> Bool {
+            guard let view = viewportView() else { return false }
+            return point.x >= 0 &&
+                point.y >= 0 &&
+                point.x <= view.bounds.width &&
+                point.y <= view.bounds.height
+        }
+
+        private func viewportView() -> NSView? {
+            view?.enclosingScrollView?.contentView ?? view
+        }
+
+        private func finishDrag() {
+            let wasTracking = startedInViewport || didDrag
+            let wasDrag = didDrag
+            startedInViewport = false
+            didDrag = false
+            pointerDownPoint = nil
+            hadSmallDrag = false
+            if wasDrag {
+                beginPostDragClickRecovery()
+            }
+            if wasTracking {
+                onEnd?()
+            }
+        }
+
+        private func cancelDrag() {
+            let wasTracking = startedInViewport || didDrag
+            let wasDrag = didDrag
+            startedInViewport = false
+            didDrag = false
+            pointerDownPoint = nil
+            hadSmallDrag = false
+            if wasDrag {
+                beginPostDragClickRecovery()
+            }
+            if wasTracking {
+                onCancel?()
+            }
+        }
+
+        private func shouldActivateDrag(at point: CGPoint) -> Bool {
+            guard let pointerDownPoint else { return true }
+            let deltaX = point.x - pointerDownPoint.x
+            let deltaY = point.y - pointerDownPoint.y
+            return hypot(deltaX, deltaY) >= dragActivationDistance
+        }
+
+        private var isRecoveringPostDragClick: Bool {
+            Date() < postDragClickRecoveryUntil
+        }
+
+        private func beginPostDragClickRecovery() {
+            guard clickRecoveryDuration > 0 else {
+                clearPostDragClickRecovery()
+                return
+            }
+
+            postDragClickRecoveryUntil = Date().addingTimeInterval(clickRecoveryDuration)
+            pendingRecoveredClickPoint = nil
+        }
+
+        private func clearPostDragClickRecovery() {
+            postDragClickRecoveryUntil = .distantPast
+            pendingRecoveredClickPoint = nil
         }
     }
 }

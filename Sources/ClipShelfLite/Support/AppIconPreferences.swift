@@ -55,4 +55,22 @@ enum AppIconPreferences {
 
         return nil
     }
+
+    static func statusBarImage(for choice: AppIconChoice) -> NSImage? {
+        let symbolName: String
+        switch choice {
+        case .clipboardTextClock:
+            symbolName = "doc.on.clipboard"
+        case .clipboardLinesClock:
+            symbolName = "clipboard"
+        case .stackedWindowsClock:
+            symbolName = "rectangle.on.rectangle"
+        }
+
+        let configuration = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "ClipShelf")?
+            .withSymbolConfiguration(configuration)
+        image?.isTemplate = true
+        return image
+    }
 }

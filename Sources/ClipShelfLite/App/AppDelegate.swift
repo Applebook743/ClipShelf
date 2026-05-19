@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        normalizeGlobalHotKeyIfNeeded()
         AppIconPreferences.applySavedChoice()
         configureStatusItem()
         showWindow()
@@ -83,6 +84,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStatusItemIcon()
     }
 
+    private func normalizeGlobalHotKeyIfNeeded() {
+        let configuration = HotKeyDefaults.load()
+        if configuration.conflictsWithSystemWindowSwitching {
+            HotKeyDefaults.save(.defaultValue)
+        }
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         rebuildMenu(menu)
     }
@@ -100,10 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateStatusItemIcon() {
-        let image = AppIconPreferences.image(for: AppIconPreferences.selected)?
-            .resizedForStatusItem()
-            ?? NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipShelf")
-        image?.isTemplate = false
+        let image = AppIconPreferences.statusBarImage(for: AppIconPreferences.selected)
         statusItem?.button?.image = image
     }
 
@@ -152,17 +157,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         return item
-    }
-}
-
-private extension NSImage {
-    func resizedForStatusItem() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1)
-        image.unlockFocus()
-        image.isTemplate = false
-        return image
     }
 }
