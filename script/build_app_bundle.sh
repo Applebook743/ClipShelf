@@ -8,7 +8,9 @@ APP_VERSION="1.1.9"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
-APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+BUILD_APP_ROOT="${TMPDIR:-/tmp}/clipshelf-app-bundle"
+APP_BUNDLE="$BUILD_APP_ROOT/$APP_NAME.app"
+DIST_APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
@@ -23,19 +25,20 @@ mkdir -p "$CLANG_MODULE_CACHE_PATH"
 swift build --disable-sandbox --scratch-path "$ROOT_DIR/.build" >&2
 BUILD_BINARY="$(swift build --disable-sandbox --scratch-path "$ROOT_DIR/.build" --show-bin-path)/$APP_NAME"
 
-rm -rf "$APP_BUNDLE"
+rm -rf "$BUILD_APP_ROOT" "$DIST_APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_MACOS/$APP_NAME"
 chmod +x "$APP_MACOS/$APP_NAME"
 
 (cd "$ROOT_DIR" && swift script/generate_app_icon.swift)
-for variant in 1 2 3; do
+for variant in 1 2 3 4; do
   iconutil -c icns "$ROOT_DIR/Assets/AppIcon${variant}.iconset" -o "$ROOT_DIR/Assets/AppIcon${variant}.icns"
 done
 cp "$ROOT_DIR/Assets/AppIcon1.icns" "$ICON_SOURCE"
 
 cp "$ICON_SOURCE" "$APP_RESOURCES/$ICON_FILE"
-cp "$ROOT_DIR"/Assets/AppIcon{1,2,3}.icns "$APP_RESOURCES/"
+cp "$ROOT_DIR"/Assets/AppIcon{1,2,3,4}.icns "$APP_RESOURCES/"
+cp "$ROOT_DIR"/Assets/AppStatusIcon.png "$APP_RESOURCES/"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -72,4 +75,6 @@ xattr -d 'com.apple.fileprovider.fpfs#P' "$APP_BUNDLE" >/dev/null 2>&1 || true
 xattr -cr "$APP_BUNDLE" >/dev/null 2>&1 || true
 codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null
 codesign --verify --deep --strict --verbose=1 "$APP_BUNDLE" >/dev/null
+mkdir -p "$DIST_DIR"
+ditto "$APP_BUNDLE" "$DIST_APP_BUNDLE" >/dev/null 2>&1 || true
 echo "$APP_BUNDLE"

@@ -2,9 +2,10 @@ import AppKit
 import SwiftUI
 
 enum AppIconChoice: Int, CaseIterable, Identifiable {
-    case clipboardTextClock = 1
-    case clipboardLinesClock = 2
-    case stackedWindowsClock = 3
+    case clipboardHistory = 1
+    case historyList = 2
+    case stackedHistory = 3
+    case compactClipboard = 4
 
     var id: Int { rawValue }
 
@@ -27,7 +28,7 @@ enum AppIconPreferences {
 
     static var selected: AppIconChoice {
         get {
-            AppIconChoice(rawValue: UserDefaults.standard.integer(forKey: selectedKey)) ?? .clipboardTextClock
+            AppIconChoice(rawValue: UserDefaults.standard.integer(forKey: selectedKey)) ?? .clipboardHistory
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: selectedKey)
@@ -41,7 +42,7 @@ enum AppIconPreferences {
     }
 
     static func apply(_ choice: AppIconChoice) {
-        NSApp.applicationIconImage = image(for: choice)
+        NSApp.applicationIconImage = dockImage(for: choice)
     }
 
     static func image(for choice: AppIconChoice) -> NSImage? {
@@ -56,21 +57,20 @@ enum AppIconPreferences {
         return nil
     }
 
+    static func dockImage(for choice: AppIconChoice) -> NSImage? {
+        guard let image = image(for: choice)?.copy() as? NSImage else { return nil }
+        image.size = NSSize(width: 128, height: 128)
+        return image
+    }
+
     static func statusBarImage(for choice: AppIconChoice) -> NSImage? {
-        let symbolName: String
-        switch choice {
-        case .clipboardTextClock:
-            symbolName = "doc.on.clipboard"
-        case .clipboardLinesClock:
-            symbolName = "clipboard"
-        case .stackedWindowsClock:
-            symbolName = "rectangle.on.rectangle"
+        guard let url = Bundle.main.url(forResource: "AppStatusIcon", withExtension: "png"),
+              let image = NSImage(contentsOf: url) else {
+            return nil
         }
 
-        let configuration = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "ClipShelf")?
-            .withSymbolConfiguration(configuration)
-        image?.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = true
         return image
     }
 }

@@ -11,8 +11,7 @@ struct MainView: View {
     @State private var anchorID: ClipItem.ID?
     @State private var isDragSelecting = false
     @State private var dragAnchorID: ClipItem.ID?
-    @State private var autoScrollTimer: Timer?
-    @State private var autoScrollDirection = 0
+    @State private var dragSnapshotItems: [ClipItem]?
     @State private var historyScrollView: NSScrollView?
     @State private var selectionColor = SelectionColorPreferences.color
     @State private var switchToClickedRecord = SelectionClickBehaviorPreferences.switchToClickedRecord
@@ -25,15 +24,20 @@ struct MainView: View {
     @State private var pinHotKey = PinHotKeyDefaults.load()
     @State private var suppressPasteUntil = Date.distantPast
     @State private var suppressRowTapUntil = Date.distantPast
+    @StateObject private var updateChecker = AppUpdateChecker.shared
     private let historyRowHeight: CGFloat = 74
     private let historyListHorizontalInset: CGFloat = 10
     private let historyListVerticalInset: CGFloat = 8
 
-    private var filteredItems: [ClipItem] {
+    private var liveFilteredItems: [ClipItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return store.items }
 
         return store.items.filter { SearchMatcher.matches($0, query: query) }
+    }
+
+    private var filteredItems: [ClipItem] {
+        dragSnapshotItems ?? liveFilteredItems
     }
 
     var body: some View {
@@ -55,9 +59,10 @@ struct MainView: View {
         }
         .onAppear {
             installCommandKeyMonitorIfNeeded()
+            updateChecker.checkIfNeeded()
         }
         .onDisappear {
-            stopAutoScroll()
+            endDragSelection()
             removeCommandKeyMonitor()
         }
     }
@@ -139,14 +144,21 @@ struct MainView: View {
                 DragSelectionCaptureView(
                     isEnabled: !showingSettings,
                     clickRecoveryDuration: postDragClickRecoveryDuration,
+                    itemIDs: filteredItems.map(\.id),
+                    rowHeight: historyRowHeight,
+                    contentTopInset: historyListVerticalInset,
+                    contentHorizontalInset: historyListHorizontalInset,
                     onPointerDown: { location in
                         handleHistoryPointerDown(at: location)
                     },
                     onSmallDragClick: { location, event in
                         handleHistorySmallDragClick(at: location, event: event)
                     },
-                    onDrag: { location, shouldSelect in
-                        handleDragSelection(at: location, scrollProxy: proxy, shouldSelect: shouldSelect)
+                    onDragBegan: {
+                        beginDragSelectionSnapshot()
+                    },
+                    onSelectionChanged: { update in
+                        applyDragSelection(update)
                     },
                     onEnd: {
                         endDragSelection()
@@ -157,7 +169,7 @@ struct MainView: View {
                 )
             )
             .onChange(of: store.items.first?.id) { newID in
-                guard let newID else { return }
+                guard let newID, !isDragSelecting else { return }
                 withAnimation(.easeOut(duration: 0.18)) {
                     proxy.scrollTo(newID, anchor: .top)
                 }
@@ -220,13 +232,25 @@ struct MainView: View {
 
                 Spacer()
 
+                if let update = updateChecker.availableUpdate {
+                    Button {
+                        updateChecker.openUpdatePage()
+                    } label: {
+                        Label("更新", systemImage: "arrow.down.circle")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.accentColor)
+                    .floatingTooltip("发现新版本 \(update.versionText)，点击打开下载页")
+                }
+
                 Button {
                     watcher.chooseFolder()
                 } label: {
                     Image(systemName: "folder")
                 }
                 .buttonStyle(.borderless)
-                .help("选择截图文件夹")
+                .floatingTooltip("选择截图文件夹")
 
                 Button {
                     showingSettings = true
@@ -234,7 +258,7 @@ struct MainView: View {
                     Image(systemName: "gearshape")
                 }
                 .buttonStyle(.borderless)
-                .help("设置")
+                .floatingTooltip("设置")
 
                 Button {
                     copyActionItems()
@@ -242,8 +266,8 @@ struct MainView: View {
                     Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.borderless)
-                .disabled(actionItems.isEmpty)
-                .help(copyActionHelp)
+                .foregroundStyle(actionItems.isEmpty ? Color.secondary.opacity(0.38) : Color.secondary)
+                .floatingTooltip(copyActionHelp)
 
                 Button {
                     pasteActionItems()
@@ -251,8 +275,8 @@ struct MainView: View {
                     Image(systemName: "arrow.down.doc")
                 }
                 .buttonStyle(.borderless)
-                .disabled(actionItems.isEmpty)
-                .help(pasteActionHelp)
+                .foregroundStyle(actionItems.isEmpty ? Color.secondary.opacity(0.38) : Color.secondary)
+                .floatingTooltip(pasteActionHelp)
 
                 Button {
                     togglePinnedForActionItems()
@@ -260,8 +284,8 @@ struct MainView: View {
                     Image(systemName: "pin")
                 }
                 .buttonStyle(.borderless)
-                .disabled(actionItems.isEmpty)
-                .help("置顶选中的记录")
+                .foregroundStyle(actionItems.isEmpty ? Color.secondary.opacity(0.38) : Color.secondary)
+                .floatingTooltip("置顶选中的记录")
 
                 Button(role: .destructive) {
                     deleteSelectedOrClear()
@@ -269,7 +293,7 @@ struct MainView: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
-                .help(selectedIDs.isEmpty ? "清空记录" : "删除选中的记录")
+                .floatingTooltip(selectedIDs.isEmpty ? "清空记录" : "删除选中的记录")
             }
 
             HStack {
@@ -307,7 +331,7 @@ struct MainView: View {
         anchorID = nil
         dragAnchorID = nil
         isDragSelecting = false
-        stopAutoScroll()
+        dragSnapshotItems = nil
     }
 
     private func handleKey(_ event: NSEvent, scrollProxy: ScrollViewProxy? = nil) {
@@ -753,18 +777,23 @@ struct MainView: View {
         return true
     }
 
-    private func beginDragSelection(at id: ClipItem.ID) {
+    private func beginDragSelectionSnapshot() {
         isDragSelecting = true
-        dragAnchorID = id
-        anchorID = id
-        focusedID = id
-        selectedIDs = [id]
+        if dragSnapshotItems == nil {
+            dragSnapshotItems = liveFilteredItems
+        }
     }
 
-    private func extendDragSelection(to id: ClipItem.ID) {
-        guard isDragSelecting, let dragAnchorID else { return }
-        focusedID = id
-        selectRange(from: dragAnchorID, to: id)
+    private func applyDragSelection(_ update: DragSelectionUpdate) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            isDragSelecting = true
+            selectedIDs = update.selectedIDs
+            focusedID = update.focusedID
+            anchorID = update.anchorID
+            dragAnchorID = update.anchorID
+        }
     }
 
     private func endDragSelection() {
@@ -773,125 +802,7 @@ struct MainView: View {
         }
         isDragSelecting = false
         dragAnchorID = nil
-        stopAutoScroll()
-    }
-
-    private func handleDragSelection(at location: CGPoint, scrollProxy: ScrollViewProxy, shouldSelect: Bool) {
-        stopAutoScroll()
-        guard shouldSelect else { return }
-        guard let id = rowID(at: location) ?? edgeRowID(for: location) else { return }
-
-        if !isDragSelecting {
-            beginDragSelection(at: id)
-        } else {
-            extendDragSelection(to: id)
-        }
-    }
-
-    private func updateAutoScroll(for location: CGPoint, scrollProxy: ScrollViewProxy) {
-        let direction = autoScrollDirection(for: location)
-
-        if direction == 0 {
-            stopAutoScroll()
-        } else {
-            startAutoScroll(direction: direction, scrollProxy: scrollProxy)
-        }
-    }
-
-    private func autoScrollDirection(for location: CGPoint) -> Int {
-        if let viewportSize = historyViewportSize {
-            let edgeDistance = min(CGFloat(120), viewportSize.height * 0.28)
-            if location.y < edgeDistance {
-                return -1
-            }
-
-            if location.y > viewportSize.height - edgeDistance {
-                return 1
-            }
-        }
-
-        guard let id = rowID(at: location),
-              let index = filteredItems.firstIndex(where: { $0.id == id }) else {
-            return 0
-        }
-
-        let visibleIDs = visibleItemIDs()
-        guard let visibleIndex = visibleIDs.firstIndex(of: id) else { return 0 }
-
-        if visibleIndex <= 1, index > 0 {
-            return -1
-        }
-
-        if visibleIndex >= max(visibleIDs.count - 2, 0), index < filteredItems.count - 1 {
-            return 1
-        }
-
-        return 0
-    }
-
-    private func startAutoScroll(direction: Int, scrollProxy: ScrollViewProxy) {
-        guard autoScrollDirection != direction || autoScrollTimer == nil else { return }
-        stopAutoScroll()
-        autoScrollDirection = direction
-        autoScroll(direction: direction, scrollProxy: scrollProxy)
-        let timer = Timer(timeInterval: 0.08, repeats: true) { _ in
-            autoScroll(direction: direction, scrollProxy: scrollProxy)
-        }
-        autoScrollTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    private func stopAutoScroll() {
-        autoScrollTimer?.invalidate()
-        autoScrollTimer = nil
-        autoScrollDirection = 0
-    }
-
-    private func autoScroll(direction: Int, scrollProxy: ScrollViewProxy) {
-        guard isDragSelecting, !filteredItems.isEmpty else {
-            stopAutoScroll()
-            return
-        }
-
-        let currentIndex = focusedID.flatMap { id in
-            filteredItems.firstIndex { $0.id == id }
-        } ?? (direction > 0 ? 0 : filteredItems.count - 1)
-        let nextIndex = min(max(currentIndex + direction * 2, 0), filteredItems.count - 1)
-        guard nextIndex != currentIndex else { return }
-
-        let nextID = filteredItems[nextIndex].id
-        focusedID = nextID
-        extendDragSelection(to: nextID)
-
-        if scrollNativeHistoryView(direction: direction) {
-            return
-        }
-
-        scrollProxy.scrollTo(nextID, anchor: direction > 0 ? .bottom : .top)
-    }
-
-    private func scrollNativeHistoryView(direction: Int) -> Bool {
-        guard let scrollView = historyScrollView,
-              let documentView = scrollView.documentView else {
-            NSLog("ClipShelf auto-scroll: missing NSScrollView")
-            return false
-        }
-
-        let clipView = scrollView.contentView
-        let visible = clipView.bounds
-        let maxY = max(0, documentView.bounds.height - visible.height)
-        let sign: CGFloat = documentView.isFlipped ? 1 : -1
-        let delta: CGFloat = CGFloat(direction) * sign * 72
-        let proposedY = min(max(visible.origin.y + delta, 0), maxY)
-        guard proposedY != visible.origin.y else {
-            NSLog("ClipShelf auto-scroll: at edge direction=\(direction) origin=\(visible.origin.y) maxY=\(maxY) flipped=\(documentView.isFlipped)")
-            return false
-        }
-
-        clipView.scroll(to: CGPoint(x: visible.origin.x, y: proposedY))
-        scrollView.reflectScrolledClipView(clipView)
-        NSLog("ClipShelf auto-scroll: scrolled direction=\(direction) from=\(visible.origin.y) to=\(proposedY) maxY=\(maxY) flipped=\(documentView.isFlipped)")
-        return true
+        dragSnapshotItems = nil
     }
 
     private func rowID(at location: CGPoint) -> ClipItem.ID? {
@@ -999,7 +910,7 @@ private struct ClipRow: View {
                 Image(systemName: item.isPinned ? "pin.fill" : "pin")
             }
             .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
-            .delayedTooltip(item.isPinned ? "取消置顶" : "置顶")
+            .floatingTooltip(item.isPinned ? "取消置顶" : "置顶")
 
             Button {
                 handleCopy()
@@ -1007,7 +918,7 @@ private struct ClipRow: View {
                 Image(systemName: "doc.on.doc")
             }
             .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
-            .delayedTooltip(isSelected ? "复制选中的记录" : "复制")
+            .floatingTooltip(isSelected ? "复制选中的记录" : "复制")
 
             Button {
                 handlePaste()
@@ -1015,7 +926,7 @@ private struct ClipRow: View {
                 Image(systemName: "arrow.down.doc")
             }
             .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
-            .delayedTooltip(isSelected ? "粘贴选中的记录" : "粘贴")
+            .floatingTooltip(isSelected ? "粘贴选中的记录" : "粘贴")
 
             Button(role: .destructive) {
                 store.remove(item)
@@ -1023,7 +934,7 @@ private struct ClipRow: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(ChatGPTIconButtonStyle(isSelected: isSelected))
-            .delayedTooltip("删除记录")
+            .floatingTooltip("删除记录")
         }
         .frame(height: 58)
         .padding(.vertical, 8)
@@ -1129,56 +1040,142 @@ private struct ChatGPTIconButtonStyle: ButtonStyle {
 }
 
 private extension View {
-    func delayedTooltip(_ text: String) -> some View {
-        modifier(DelayedTooltipModifier(text: text))
+    func floatingTooltip(_ text: String) -> some View {
+        background(FloatingTooltipAnchor(text: text))
     }
 }
 
-private struct DelayedTooltipModifier: ViewModifier {
+private struct FloatingTooltipAnchor: NSViewRepresentable {
     let text: String
-    @State private var isHovering = false
-    @State private var isVisible = false
-    @State private var hoverTask: DispatchWorkItem?
 
-    func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .top) {
-                if isVisible {
-                    Text(text)
-                        .font(.caption)
-                        .foregroundStyle(Color.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(Color.black.opacity(0.86))
-                        )
-                        .fixedSize()
-                        .offset(y: -34)
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                }
-            }
-            .onHover { hovering in
-                isHovering = hovering
-                hoverTask?.cancel()
+    func makeNSView(context: Context) -> TooltipTrackingView {
+        let view = TooltipTrackingView()
+        view.text = text
+        return view
+    }
 
-                if hovering {
-                    let task = DispatchWorkItem {
-                        if isHovering {
-                            withAnimation(.easeOut(duration: 0.12)) {
-                                isVisible = true
-                            }
-                        }
-                    }
-                    hoverTask = task
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: task)
-                } else {
-                    withAnimation(.easeOut(duration: 0.08)) {
-                        isVisible = false
-                    }
-                }
-            }
+    func updateNSView(_ nsView: TooltipTrackingView, context: Context) {
+        nsView.text = text
+    }
+}
+
+private final class TooltipTrackingView: NSView {
+    var text = ""
+    private var trackingAreaReference: NSTrackingArea?
+    private var hoverTask: DispatchWorkItem?
+
+    override var acceptsFirstResponder: Bool { false }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaReference {
+            removeTrackingArea(trackingAreaReference)
+        }
+
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        trackingAreaReference = area
+        addTrackingArea(area)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hoverTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.window != nil else { return }
+            FloatingTooltipWindow.shared.show(text: self.text, for: self)
+        }
+        hoverTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: task)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverTask?.cancel()
+        FloatingTooltipWindow.shared.hide()
+    }
+
+    override func removeFromSuperview() {
+        hoverTask?.cancel()
+        FloatingTooltipWindow.shared.hide()
+        super.removeFromSuperview()
+    }
+}
+
+private final class FloatingTooltipWindow {
+    static let shared = FloatingTooltipWindow()
+    private var window: NSWindow?
+    private let label = NSTextField(labelWithString: "")
+
+    private init() {
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .white
+        label.alignment = .center
+        label.lineBreakMode = .byClipping
+        label.maximumNumberOfLines = 1
+        label.backgroundColor = .clear
+    }
+
+    func show(text: String, for sourceView: NSView) {
+        guard let sourceWindow = sourceView.window else { return }
+        label.stringValue = text
+        let textSize = label.intrinsicContentSize
+        let size = NSSize(width: textSize.width + 16, height: textSize.height + 10)
+        let localRect = sourceView.convert(sourceView.bounds, to: nil)
+        let screenRect = sourceWindow.convertToScreen(localRect)
+        let screenFrame = sourceWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let prefersAbove = screenRect.minY - size.height - 8 > screenFrame.minY
+        let originY = prefersAbove ? screenRect.minY - size.height - 8 : screenRect.maxY + 8
+        let originX = min(max(screenRect.midX - size.width / 2, screenFrame.minX + 8), screenFrame.maxX - size.width - 8)
+
+        let tooltipWindow = window ?? makeWindow()
+        tooltipWindow.contentView = TooltipBubbleView(label: label)
+        tooltipWindow.setFrame(NSRect(origin: NSPoint(x: originX, y: originY), size: size), display: true)
+        tooltipWindow.orderFrontRegardless()
+        window = tooltipWindow
+    }
+
+    func hide() {
+        window?.orderOut(nil)
+    }
+
+    private func makeWindow() -> NSWindow {
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 80, height: 28),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        window.level = .floating
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.ignoresMouseEvents = true
+        return window
+    }
+}
+
+private final class TooltipBubbleView: NSView {
+    private let label: NSTextField
+
+    init(label: NSTextField) {
+        self.label = label
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.88).cgColor
+        layer?.cornerRadius = 7
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        label.frame = bounds.insetBy(dx: 8, dy: 5)
     }
 }
 
@@ -1283,12 +1280,25 @@ private final class KeyCaptureNSView: NSView {
     }
 }
 
+private struct DragSelectionUpdate {
+    let selectedIDs: Set<ClipItem.ID>
+    let focusedID: ClipItem.ID
+    let anchorID: ClipItem.ID
+    let lowerBound: Int
+    let upperBound: Int
+}
+
 private struct DragSelectionCaptureView: NSViewRepresentable {
     let isEnabled: Bool
     let clickRecoveryDuration: TimeInterval
+    let itemIDs: [ClipItem.ID]
+    let rowHeight: CGFloat
+    let contentTopInset: CGFloat
+    let contentHorizontalInset: CGFloat
     let onPointerDown: (CGPoint) -> Void
     let onSmallDragClick: (CGPoint, NSEvent?) -> Void
-    let onDrag: (CGPoint, Bool) -> Void
+    let onDragBegan: () -> Void
+    let onSelectionChanged: (DragSelectionUpdate) -> Void
     let onEnd: () -> Void
     let onCancel: () -> Void
 
@@ -1306,9 +1316,14 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.isEnabled = isEnabled
         context.coordinator.setClickRecoveryDuration(clickRecoveryDuration)
+        context.coordinator.itemIDs = itemIDs
+        context.coordinator.rowHeight = rowHeight
+        context.coordinator.contentTopInset = contentTopInset
+        context.coordinator.contentHorizontalInset = contentHorizontalInset
         context.coordinator.onPointerDown = onPointerDown
         context.coordinator.onSmallDragClick = onSmallDragClick
-        context.coordinator.onDrag = onDrag
+        context.coordinator.onDragBegan = onDragBegan
+        context.coordinator.onSelectionChanged = onSelectionChanged
         context.coordinator.onEnd = onEnd
         context.coordinator.onCancel = onCancel
     }
@@ -1320,11 +1335,16 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
     final class Coordinator {
         var onPointerDown: ((CGPoint) -> Void)?
         var onSmallDragClick: ((CGPoint, NSEvent?) -> Void)?
-        var onDrag: ((CGPoint, Bool) -> Void)?
+        var onDragBegan: (() -> Void)?
+        var onSelectionChanged: ((DragSelectionUpdate) -> Void)?
         var onEnd: (() -> Void)?
         var onCancel: (() -> Void)?
         var isEnabled = true
         var clickRecoveryDuration: TimeInterval = DragSelectionPreferences.clickRecoveryDuration
+        var itemIDs: [ClipItem.ID] = []
+        var rowHeight: CGFloat = 74
+        var contentTopInset: CGFloat = 8
+        var contentHorizontalInset: CGFloat = 10
         weak var view: NSView?
 
         private var monitor: Any?
@@ -1332,10 +1352,27 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
         private var startedInViewport = false
         private var didDrag = false
         private var pointerDownPoint: CGPoint?
+        private var pointerDownEvent: NSEvent?
         private var hadSmallDrag = false
+        private var itemIDsSnapshot: [ClipItem.ID] = []
+        private var anchorIndex: Int?
+        private var lastDragEvent: NSEvent?
+        private var autoScrollTimer: Timer?
+        private var currentScrollSpeed: CGFloat = 0
+        private var lastTargetScrollSpeed: CGFloat = 0
+        private var lastSelectionBounds: ClosedRange<Int>?
+        private var lastLogTime = Date.distantPast
+        private var lastAutoScrollFrameTime: CFTimeInterval?
         private var postDragClickRecoveryUntil = Date.distantPast
         private var pendingRecoveredClickPoint: CGPoint?
         private let dragActivationDistance: CGFloat = 6
+        private let edgeZoneHeight: CGFloat = 72
+        private let maxScrollSpeed: CGFloat = 900
+        private let minScrollSpeed: CGFloat = 40
+        private let accelerationSmoothing: CGFloat = 0.18
+        private let frameInterval: TimeInterval = 1.0 / 60.0
+        private let deadZone: CGFloat = 4
+        private let debugDragSelection = false
 
         func install() {
             guard monitor == nil else { return }
@@ -1408,6 +1445,7 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
                 didDrag = false
                 hadSmallDrag = false
                 pointerDownPoint = startedInViewport ? point : nil
+                pointerDownEvent = startedInViewport ? event : nil
                 if startedInViewport {
                     onPointerDown?(point)
                 }
@@ -1423,6 +1461,7 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
                     didDrag = false
                     hadSmallDrag = false
                     pointerDownPoint = startedInViewport ? point : nil
+                    pointerDownEvent = startedInViewport ? event : nil
                     if startedInViewport {
                         onPointerDown?(point)
                     }
@@ -1432,8 +1471,12 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
                     hadSmallDrag = true
                     return nil
                 }
-                didDrag = true
-                onDrag?(point, true)
+                if !didDrag {
+                    guard beginRangeSelection() else { return nil }
+                    didDrag = true
+                    onDragBegan?()
+                }
+                updateRangeSelection(with: event)
                 return nil
             case .leftMouseUp:
                 if isRecoveringPostDragClick {
@@ -1465,9 +1508,10 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
         private func localTopLeftPoint(from event: NSEvent) -> CGPoint? {
             guard let viewport = viewportView() else { return nil }
             let pointInView = viewport.convert(event.locationInWindow, from: nil)
+            let visible = viewport.bounds
             return CGPoint(
-                x: pointInView.x,
-                y: viewport.isFlipped ? pointInView.y : viewport.bounds.height - pointInView.y
+                x: pointInView.x - visible.minX,
+                y: viewport.isFlipped ? pointInView.y - visible.minY : visible.maxY - pointInView.y
             )
         }
 
@@ -1480,16 +1524,258 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
         }
 
         private func viewportView() -> NSView? {
-            view?.enclosingScrollView?.contentView ?? view
+            scrollView()?.contentView ?? view
+        }
+
+        private func scrollView() -> NSScrollView? {
+            if let enclosing = view?.enclosingScrollView {
+                return enclosing
+            }
+
+            guard let contentView = view?.window?.contentView else {
+                return nil
+            }
+
+            return firstScrollView(in: contentView)
+        }
+
+        private func firstScrollView(in view: NSView) -> NSScrollView? {
+            if let scrollView = view as? NSScrollView {
+                return scrollView
+            }
+
+            for subview in view.subviews {
+                if let scrollView = firstScrollView(in: subview) {
+                    return scrollView
+                }
+            }
+
+            return nil
+        }
+
+        private func beginRangeSelection() -> Bool {
+            guard !itemIDs.isEmpty,
+                  let event = pointerDownEvent else {
+                return false
+            }
+
+            itemIDsSnapshot = itemIDs
+            guard let index = rowIndex(from: event, clamped: false) else {
+                itemIDsSnapshot = []
+                return false
+            }
+
+            anchorIndex = index
+            lastDragEvent = event
+            startAutoScrollTimer()
+            updateSelection(hoverIndex: index, event: event, didScroll: false)
+            return true
+        }
+
+        private func updateRangeSelection(with event: NSEvent) {
+            guard didDrag else { return }
+            lastDragEvent = event
+            updateSelectionFromEvent(event, didScroll: false)
+        }
+
+        private func updateSelection(hoverIndex: Int, event: NSEvent, didScroll: Bool) {
+            guard let anchorIndex,
+                  itemIDsSnapshot.indices.contains(anchorIndex),
+                  itemIDsSnapshot.indices.contains(hoverIndex) else { return }
+
+            let bounds = min(anchorIndex, hoverIndex)...max(anchorIndex, hoverIndex)
+            guard bounds != lastSelectionBounds else {
+                logDragState(hoverIndex: hoverIndex, bounds: bounds, didScroll: didScroll, event: event)
+                return
+            }
+
+            lastSelectionBounds = bounds
+            let selectedIDs = Set(bounds.map { itemIDsSnapshot[$0] })
+            let update = DragSelectionUpdate(
+                selectedIDs: selectedIDs,
+                focusedID: itemIDsSnapshot[hoverIndex],
+                anchorID: itemIDsSnapshot[anchorIndex],
+                lowerBound: bounds.lowerBound,
+                upperBound: bounds.upperBound
+            )
+            onSelectionChanged?(update)
+            logDragState(hoverIndex: hoverIndex, bounds: bounds, didScroll: didScroll, event: event)
+        }
+
+        private func updateSelectionFromEvent(_ event: NSEvent, didScroll: Bool) {
+            guard let hoverIndex = rowIndex(from: event, clamped: true) else {
+                return
+            }
+
+            updateSelection(hoverIndex: hoverIndex, event: event, didScroll: didScroll)
+        }
+
+        private func rowIndex(from event: NSEvent, clamped: Bool) -> Int? {
+            guard !itemIDsSnapshot.isEmpty,
+                  let mouseY = documentY(from: event) else { return nil }
+
+            let rawIndex = Int(floor((mouseY - contentTopInset) / rowHeight))
+            if clamped {
+                return min(max(rawIndex, 0), itemIDsSnapshot.count - 1)
+            }
+
+            guard itemIDsSnapshot.indices.contains(rawIndex),
+                  let point = localTopLeftPoint(from: event),
+                  point.x >= contentHorizontalInset,
+                  let viewport = viewportView(),
+                  point.x <= viewport.bounds.width - contentHorizontalInset else {
+                return nil
+            }
+
+            return rawIndex
+        }
+
+        private func documentY(from event: NSEvent) -> CGFloat? {
+            guard let scrollView = scrollView(),
+                  let documentView = scrollView.documentView,
+                  let point = localTopLeftPoint(from: event) else { return nil }
+
+            let visible = scrollView.contentView.bounds
+            if documentView.isFlipped {
+                return visible.minY + point.y
+            }
+
+            let documentHeight = documentView.bounds.height
+            let visibleTop = max(0, documentHeight - visible.maxY)
+            return visibleTop + point.y
+        }
+
+        private func startAutoScrollTimer() {
+            guard autoScrollTimer == nil else { return }
+
+            lastAutoScrollFrameTime = CACurrentMediaTime()
+            let timer = Timer(timeInterval: frameInterval, repeats: true) { [weak self] _ in
+                guard let self, let event = self.lastDragEvent else { return }
+                self.performAutoScrollFrame(with: event)
+            }
+            autoScrollTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .eventTracking)
+        }
+
+        private func stopAutoScroll() {
+            autoScrollTimer?.invalidate()
+            autoScrollTimer = nil
+            lastDragEvent = nil
+            lastAutoScrollFrameTime = nil
+            currentScrollSpeed = 0
+            lastTargetScrollSpeed = 0
+        }
+
+        private func performAutoScrollFrame(with event: NSEvent) {
+            guard let scrollView = scrollView(),
+                  let documentView = scrollView.documentView else { return }
+
+            let targetSpeed = targetScrollSpeed(for: event, in: scrollView)
+            lastTargetScrollSpeed = targetSpeed
+            currentScrollSpeed += (targetSpeed - currentScrollSpeed) * accelerationSmoothing
+            let deltaTime = autoScrollDeltaTime()
+
+            if abs(currentScrollSpeed) < 0.5, targetSpeed == 0 {
+                currentScrollSpeed = 0
+                updateSelectionFromEvent(event, didScroll: false)
+                return
+            }
+
+            let clipView = scrollView.contentView
+            let visible = clipView.bounds
+            let documentHeight = documentView.bounds.height
+            let maxY = max(0, documentHeight - visible.height)
+            let proposedY = min(max(visible.origin.y + currentScrollSpeed * deltaTime, 0), maxY)
+            let didScroll = proposedY != visible.origin.y
+
+            if didScroll {
+                clipView.scroll(to: NSPoint(x: visible.origin.x, y: proposedY))
+                scrollView.reflectScrolledClipView(clipView)
+            } else if proposedY == 0 || proposedY == maxY {
+                currentScrollSpeed = 0
+            }
+
+            updateSelectionFromEvent(event, didScroll: didScroll)
+        }
+
+        private func autoScrollDeltaTime() -> CGFloat {
+            let now = CACurrentMediaTime()
+            defer { lastAutoScrollFrameTime = now }
+            guard let lastAutoScrollFrameTime else {
+                return CGFloat(frameInterval)
+            }
+
+            let elapsed = now - lastAutoScrollFrameTime
+            return CGFloat(min(max(elapsed, 1.0 / 120.0), 1.0 / 45.0))
+        }
+
+        private func targetScrollSpeed(for event: NSEvent, in scrollView: NSScrollView) -> CGFloat {
+            guard let mouseY = documentY(from: event) else { return 0 }
+
+            let visibleRect = scrollView.contentView.bounds
+            let topEdge = visibleRect.minY
+            let bottomEdge = visibleRect.maxY
+
+            if mouseY < topEdge + edgeZoneHeight {
+                let distanceToEdge = max(mouseY - topEdge, 0)
+                return -scrollSpeed(distanceToEdge: distanceToEdge)
+            }
+
+            if mouseY > bottomEdge - edgeZoneHeight {
+                let distanceToEdge = max(bottomEdge - mouseY, 0)
+                return scrollSpeed(distanceToEdge: distanceToEdge)
+            }
+
+            return 0
+        }
+
+        private func scrollSpeed(distanceToEdge: CGFloat) -> CGFloat {
+            let rawPenetration = min(max(1 - distanceToEdge / edgeZoneHeight, 0), 1)
+            let deadZonePenetration = deadZone / edgeZoneHeight
+            guard rawPenetration > deadZonePenetration else { return 0 }
+
+            let penetration = (rawPenetration - deadZonePenetration) / (1 - deadZonePenetration)
+            let eased = penetration * penetration
+            return minScrollSpeed + eased * (maxScrollSpeed - minScrollSpeed)
+        }
+
+        private func logDragState(
+            hoverIndex: Int,
+            bounds: ClosedRange<Int>,
+            didScroll: Bool,
+            event: NSEvent
+        ) {
+            #if DEBUG
+            guard debugDragSelection else { return }
+            let now = Date()
+            guard now.timeIntervalSince(lastLogTime) >= 0.15 else { return }
+            lastLogTime = now
+
+            guard let scrollView = scrollView(),
+                  let documentView = scrollView.documentView,
+                  let mouseY = documentY(from: event) else { return }
+
+            let visibleRect = documentView.visibleRect
+            let clipOriginY = scrollView.contentView.bounds.origin.y
+            NSLog(
+                "ClipShelf drag-select visibleMinY=\(visibleRect.minY) visibleMaxY=\(visibleRect.maxY) mouseY=\(mouseY) anchorIndex=\(anchorIndex ?? -1) hoverIndex=\(hoverIndex) selection=\(bounds.lowerBound)...\(bounds.upperBound) clipOriginY=\(clipOriginY) targetSpeed=\(lastTargetScrollSpeed) currentSpeed=\(currentScrollSpeed) didScroll=\(didScroll)"
+            )
+            #endif
         }
 
         private func finishDrag() {
             let wasTracking = startedInViewport || didDrag
             let wasDrag = didDrag
+            stopAutoScroll()
             startedInViewport = false
             didDrag = false
             pointerDownPoint = nil
+            pointerDownEvent = nil
             hadSmallDrag = false
+            itemIDsSnapshot = []
+            anchorIndex = nil
+            lastSelectionBounds = nil
             if wasDrag {
                 beginPostDragClickRecovery()
             }
@@ -1501,10 +1787,15 @@ private struct DragSelectionCaptureView: NSViewRepresentable {
         private func cancelDrag() {
             let wasTracking = startedInViewport || didDrag
             let wasDrag = didDrag
+            stopAutoScroll()
             startedInViewport = false
             didDrag = false
             pointerDownPoint = nil
+            pointerDownEvent = nil
             hadSmallDrag = false
+            itemIDsSnapshot = []
+            anchorIndex = nil
+            lastSelectionBounds = nil
             if wasDrag {
                 beginPostDragClickRecovery()
             }

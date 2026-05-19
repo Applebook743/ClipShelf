@@ -5,7 +5,7 @@ let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let assets = root.appendingPathComponent("Assets", isDirectory: true)
 try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
 
-let sizes: [(String, CGFloat)] = [
+let appIconSizes: [(String, CGFloat)] = [
     ("icon_16x16.png", 16),
     ("icon_16x16@2x.png", 32),
     ("icon_32x32.png", 32),
@@ -19,191 +19,189 @@ let sizes: [(String, CGFloat)] = [
 ]
 
 enum IconVariant: Int, CaseIterable {
-    case clipboardTextClock = 1
-    case clipboardLinesClock = 2
-    case stackedWindowsClock = 3
+    case clipboardHistory = 1
+    case historyList = 2
+    case stackedHistory = 3
+    case compactClipboard = 4
 
     var iconsetName: String {
         "AppIcon\(rawValue).iconset"
     }
+
+    var sourceName: String {
+        "AppIconSource\(rawValue).png"
+    }
 }
 
-func iconImage(size: CGFloat, variant: IconVariant) -> NSImage {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
+func pngData(from image: NSImage) -> Data? {
+    guard let tiff = image.tiffRepresentation,
+          let bitmap = NSBitmapImageRep(data: tiff) else {
+        return nil
+    }
 
+    return bitmap.representation(using: .png, properties: [:])
+}
+
+func appIconPNG(from source: NSImage, size: CGFloat) -> Data? {
     let rect = NSRect(x: 0, y: 0, width: size, height: size)
+    let image = NSImage(size: rect.size)
+    let tileInset = size * 0.075
+    let tileRect = rect.insetBy(dx: tileInset, dy: tileInset)
+
+    image.lockFocus()
+    NSGraphicsContext.current?.imageInterpolation = .high
     NSColor.clear.setFill()
     rect.fill()
 
-    drawTile(in: rect, size: size)
+    let cornerRadius = tileRect.width * 0.22
+    let path = NSBezierPath(roundedRect: tileRect, xRadius: cornerRadius, yRadius: cornerRadius)
+    path.addClip()
+    source.draw(in: tileRect, from: .zero, operation: .sourceOver, fraction: 1)
+    image.unlockFocus()
 
-    switch variant {
-    case .clipboardTextClock:
-        drawClipboard(in: rect, size: size, lineStyle: .greenShort)
-    case .clipboardLinesClock:
-        drawClipboard(in: rect, size: size, lineStyle: .grayLines)
-    case .stackedWindowsClock:
-        drawStackedWindows(in: rect, size: size)
+    return pngData(from: image)
+}
+
+func strokePath(_ path: NSBezierPath, width: CGFloat = 4.2) {
+    NSColor.black.setStroke()
+    path.lineWidth = width
+    path.lineCapStyle = .round
+    path.lineJoinStyle = .round
+    path.stroke()
+}
+
+func strokeRoundedRect(_ rect: NSRect, radius: CGFloat, width: CGFloat = 4.2) {
+    strokePath(NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius), width: width)
+}
+
+func strokeLine(from start: NSPoint, to end: NSPoint, width: CGFloat = 4.2) {
+    let path = NSBezierPath()
+    path.move(to: start)
+    path.line(to: end)
+    strokePath(path, width: width)
+}
+
+func drawClipboardOutline(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) {
+    let path = NSBezierPath()
+    path.move(to: NSPoint(x: x + width * 0.15, y: y))
+    path.line(to: NSPoint(x: x, y: y))
+    path.line(to: NSPoint(x: x, y: y + height * 0.86))
+    path.line(to: NSPoint(x: x + width * 0.30, y: y + height * 0.86))
+    path.move(to: NSPoint(x: x + width * 0.70, y: y + height * 0.86))
+    path.line(to: NSPoint(x: x + width, y: y + height * 0.86))
+    path.line(to: NSPoint(x: x + width, y: y + height * 0.30))
+    strokePath(path)
+
+    strokeRoundedRect(
+        NSRect(x: x + width * 0.30, y: y + height * 0.78, width: width * 0.40, height: height * 0.20),
+        radius: 4,
+        width: 4.2
+    )
+    strokeRoundedRect(
+        NSRect(x: x + width * 0.43, y: y + height * 0.91, width: width * 0.14, height: height * 0.10),
+        radius: 4,
+        width: 3.6
+    )
+}
+
+func drawClock(center: NSPoint, radius: CGFloat) {
+    let circle = NSBezierPath()
+    circle.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 300)
+    strokePath(circle)
+    strokeLine(from: NSPoint(x: center.x, y: center.y), to: NSPoint(x: center.x, y: center.y + radius * 0.48), width: 4)
+    strokeLine(from: NSPoint(x: center.x, y: center.y), to: NSPoint(x: center.x + radius * 0.43, y: center.y - radius * 0.36), width: 4)
+}
+
+func drawHistoryDots(center: NSPoint, radius: CGFloat) {
+    let path = NSBezierPath()
+    path.appendArc(withCenter: center, radius: radius, startAngle: 40, endAngle: 305)
+    strokePath(path)
+
+    for offset in [-8, 0, 8] {
+        NSColor.black.setFill()
+        NSBezierPath(ovalIn: NSRect(x: center.x + CGFloat(offset) - 2.3, y: center.y - 2.3, width: 4.6, height: 4.6)).fill()
     }
+}
 
-    drawClock(in: rect, size: size)
+func drawStatusIcon() -> NSImage {
+    let size: CGFloat = 72
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.lockFocus()
+    NSColor.clear.setFill()
+    NSRect(x: 0, y: 0, width: size, height: size).fill()
+
+    let clipboard = NSBezierPath()
+    clipboard.move(to: NSPoint(x: 38, y: 10))
+    clipboard.line(to: NSPoint(x: 18, y: 10))
+    clipboard.curve(
+        to: NSPoint(x: 13, y: 15),
+        controlPoint1: NSPoint(x: 15, y: 10),
+        controlPoint2: NSPoint(x: 13, y: 12)
+    )
+    clipboard.line(to: NSPoint(x: 13, y: 45))
+    clipboard.curve(
+        to: NSPoint(x: 19, y: 51),
+        controlPoint1: NSPoint(x: 13, y: 49),
+        controlPoint2: NSPoint(x: 16, y: 51)
+    )
+    clipboard.line(to: NSPoint(x: 26, y: 51))
+    clipboard.move(to: NSPoint(x: 46, y: 51))
+    clipboard.line(to: NSPoint(x: 53, y: 51))
+    clipboard.curve(
+        to: NSPoint(x: 59, y: 45),
+        controlPoint1: NSPoint(x: 57, y: 51),
+        controlPoint2: NSPoint(x: 59, y: 49)
+    )
+    clipboard.line(to: NSPoint(x: 59, y: 35))
+    strokePath(clipboard, width: 4.8)
+
+    strokeRoundedRect(NSRect(x: 25, y: 49, width: 22, height: 14), radius: 5, width: 4.8)
+    strokeLine(from: NSPoint(x: 27, y: 40), to: NSPoint(x: 45, y: 40), width: 4.1)
+    strokeLine(from: NSPoint(x: 27, y: 31), to: NSPoint(x: 40, y: 31), width: 4.1)
+    strokeLine(from: NSPoint(x: 27, y: 23), to: NSPoint(x: 35, y: 23), width: 4.1)
+
+    let clockCenter = NSPoint(x: 50, y: 22)
+    let clockRadius: CGFloat = 18
+    let clock = NSBezierPath(ovalIn: NSRect(
+        x: clockCenter.x - clockRadius,
+        y: clockCenter.y - clockRadius,
+        width: clockRadius * 2,
+        height: clockRadius * 2
+    ))
+    strokePath(clock, width: 5)
+    strokeLine(from: clockCenter, to: NSPoint(x: clockCenter.x, y: clockCenter.y + 13), width: 5)
+    strokeLine(from: clockCenter, to: NSPoint(x: clockCenter.x + 10, y: clockCenter.y - 8), width: 5)
 
     image.unlockFocus()
     return image
 }
 
-func drawTile(in rect: NSRect, size: CGFloat) {
-    let inset = size * 0.055
-    let tileRect = rect.insetBy(dx: inset, dy: inset)
-    let radius = size * 0.16
-    let tile = NSBezierPath(roundedRect: tileRect, xRadius: radius, yRadius: radius)
-
-    NSColor(calibratedWhite: 1, alpha: 1).setFill()
-    tile.fill()
-
-    NSColor(calibratedWhite: 0.82, alpha: 0.62).setStroke()
-    tile.lineWidth = max(1, size * 0.008)
-    tile.stroke()
-
-    let highlight = NSBezierPath(roundedRect: tileRect.insetBy(dx: size * 0.018, dy: size * 0.018), xRadius: radius * 0.88, yRadius: radius * 0.88)
-    NSColor.white.withAlphaComponent(0.86).setStroke()
-    highlight.lineWidth = max(0.7, size * 0.005)
-    highlight.stroke()
+func statusIconPNG() -> Data? {
+    pngData(from: drawStatusIcon())
 }
-
-enum ClipboardLineStyle {
-    case greenShort
-    case grayLines
-}
-
-func drawClipboard(in rect: NSRect, size: CGFloat, lineStyle: ClipboardLineStyle) {
-    let stroke = NSColor(calibratedRed: 0.16, green: 0.20, blue: 0.24, alpha: 1)
-    let boardRect = NSRect(x: size * 0.29, y: size * 0.23, width: size * 0.34, height: size * 0.47)
-    let board = NSBezierPath(roundedRect: boardRect, xRadius: size * 0.035, yRadius: size * 0.035)
-
-    NSColor.clear.setFill()
-    board.fill()
-    stroke.setStroke()
-    board.lineWidth = max(2.4, size * 0.035)
-    board.lineJoinStyle = .round
-    board.stroke()
-
-    let clipRect = NSRect(x: size * 0.39, y: size * 0.66, width: size * 0.17, height: size * 0.08)
-    let clip = NSBezierPath(roundedRect: clipRect, xRadius: size * 0.022, yRadius: size * 0.022)
-    NSColor(calibratedWhite: 1, alpha: 1).setFill()
-    clip.fill()
-    stroke.setStroke()
-    clip.lineWidth = max(2.1, size * 0.030)
-    clip.stroke()
-
-    switch lineStyle {
-    case .greenShort:
-        drawLine(x1: 0.40, x2: 0.57, y: 0.52, size: size, color: tealColor, width: 0.030)
-        drawLine(x1: 0.40, x2: 0.51, y: 0.43, size: size, color: tealColor, width: 0.026)
-    case .grayLines:
-        let gray = NSColor(calibratedRed: 0.46, green: 0.48, blue: 0.50, alpha: 0.78)
-        drawLine(x1: 0.38, x2: 0.58, y: 0.55, size: size, color: gray, width: 0.024)
-        drawLine(x1: 0.38, x2: 0.54, y: 0.45, size: size, color: gray, width: 0.024)
-        drawLine(x1: 0.38, x2: 0.49, y: 0.36, size: size, color: gray, width: 0.024)
-    }
-}
-
-func drawStackedWindows(in rect: NSRect, size: CGFloat) {
-    let stroke = NSColor(calibratedRed: 0.16, green: 0.20, blue: 0.24, alpha: 1)
-
-    let backRect = NSRect(x: size * 0.30, y: size * 0.34, width: size * 0.30, height: size * 0.38)
-    let frontRect = NSRect(x: size * 0.40, y: size * 0.24, width: size * 0.34, height: size * 0.38)
-
-    for windowRect in [backRect, frontRect] {
-        let path = openWindowPath(rect: windowRect, size: size)
-        stroke.setStroke()
-        path.lineWidth = max(2.5, size * 0.036)
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        path.stroke()
-    }
-}
-
-func openWindowPath(rect: NSRect, size: CGFloat) -> NSBezierPath {
-    let path = NSBezierPath()
-    let radius = size * 0.035
-    path.move(to: NSPoint(x: rect.minX + radius, y: rect.maxY))
-    path.line(to: NSPoint(x: rect.maxX - radius, y: rect.maxY))
-    path.curve(
-        to: NSPoint(x: rect.maxX, y: rect.maxY - radius),
-        controlPoint1: NSPoint(x: rect.maxX - radius * 0.45, y: rect.maxY),
-        controlPoint2: NSPoint(x: rect.maxX, y: rect.maxY - radius * 0.45)
-    )
-    path.line(to: NSPoint(x: rect.maxX, y: rect.minY + radius))
-    path.curve(
-        to: NSPoint(x: rect.maxX - radius, y: rect.minY),
-        controlPoint1: NSPoint(x: rect.maxX, y: rect.minY + radius * 0.45),
-        controlPoint2: NSPoint(x: rect.maxX - radius * 0.45, y: rect.minY)
-    )
-    path.line(to: NSPoint(x: rect.minX + radius, y: rect.minY))
-    path.curve(
-        to: NSPoint(x: rect.minX, y: rect.minY + radius),
-        controlPoint1: NSPoint(x: rect.minX + radius * 0.45, y: rect.minY),
-        controlPoint2: NSPoint(x: rect.minX, y: rect.minY + radius * 0.45)
-    )
-    path.line(to: NSPoint(x: rect.minX, y: rect.maxY - radius))
-    return path
-}
-
-func drawClock(in rect: NSRect, size: CGFloat) {
-    let clockRect = NSRect(x: size * 0.55, y: size * 0.22, width: size * 0.26, height: size * 0.26)
-    let circle = NSBezierPath(ovalIn: clockRect)
-    NSColor.white.setFill()
-    circle.fill()
-    tealColor.setStroke()
-    circle.lineWidth = max(2.4, size * 0.034)
-    circle.stroke()
-
-    let center = NSPoint(x: clockRect.midX, y: clockRect.midY)
-    tealColor.setStroke()
-    let hour = NSBezierPath()
-    hour.lineWidth = max(2, size * 0.024)
-    hour.lineCapStyle = .round
-    hour.move(to: center)
-    hour.line(to: NSPoint(x: center.x, y: center.y + size * 0.065))
-    hour.stroke()
-
-    let minute = NSBezierPath()
-    minute.lineWidth = max(2, size * 0.024)
-    minute.lineCapStyle = .round
-    minute.move(to: center)
-    minute.line(to: NSPoint(x: center.x + size * 0.055, y: center.y - size * 0.045))
-    minute.stroke()
-}
-
-func drawLine(x1: CGFloat, x2: CGFloat, y: CGFloat, size: CGFloat, color: NSColor, width: CGFloat) {
-    let path = NSBezierPath()
-    path.lineWidth = max(1.5, size * width)
-    path.lineCapStyle = .round
-    path.move(to: NSPoint(x: size * x1, y: size * y))
-    path.line(to: NSPoint(x: size * x2, y: size * y))
-    color.setStroke()
-    path.stroke()
-}
-
-let tealColor = NSColor(calibratedRed: 0.10, green: 0.72, blue: 0.62, alpha: 1)
 
 for variant in IconVariant.allCases {
+    let sourceURL = assets.appendingPathComponent(variant.sourceName)
+    guard let source = NSImage(contentsOf: sourceURL) else {
+        fputs("Missing icon source: \(sourceURL.path)\n", stderr)
+        exit(1)
+    }
+
     let iconset = assets.appendingPathComponent(variant.iconsetName, isDirectory: true)
     if FileManager.default.fileExists(atPath: iconset.path) {
         try FileManager.default.removeItem(at: iconset)
     }
     try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
 
-    for (name, size) in sizes {
-        let image = iconImage(size: size, variant: variant)
-        guard let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:]) else {
+    for (name, size) in appIconSizes {
+        guard let png = appIconPNG(from: source, size: size) else {
             continue
         }
 
         try png.write(to: iconset.appendingPathComponent(name))
     }
+}
+
+if let png = statusIconPNG() {
+    try png.write(to: assets.appendingPathComponent("AppStatusIcon.png"))
 }

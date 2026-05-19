@@ -16,7 +16,8 @@ ClipShelf 是一个简洁的 macOS 剪贴板历史工具，支持文字、文件
 - 支持记录置顶，置顶记录会固定显示在普通记录前面
 - 支持自定义全局呼出快捷键、取消选择快捷键、置顶选中记录快捷键
 - 支持开机自启动
-- 支持三种 App 图标方案
+- 支持四种 App 图标方案
+- GitHub Releases 有新版本时，主界面会显示更新按钮
 
 ### 系统要求
 
@@ -97,7 +98,8 @@ ClipShelf is a lightweight clipboard history app for macOS. It records text, fil
 - Pin records so important clips stay above normal history
 - Custom global shortcut, clear-selection shortcut, and pin-selected-records shortcut
 - Launch at login
-- Three selectable app icon styles
+- Four selectable app icon styles
+- Shows an update button in the main window when a newer GitHub Release is available
 
 ### Requirements
 

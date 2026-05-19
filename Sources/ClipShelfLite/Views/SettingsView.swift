@@ -73,7 +73,7 @@ struct SettingsView: View {
                 }
             }
 
-            Text("选择后会立即更新程序坞和菜单栏图标，并在下次打开时继续使用。")
+            Text("选择后会立即更新程序坞和应用内图标，并在下次打开时继续使用。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

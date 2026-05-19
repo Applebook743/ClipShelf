@@ -2,6 +2,7 @@
 .build/
 dist/
 release/
+backups/
 *.xcuserstate
 *.swp
 *.tmp
