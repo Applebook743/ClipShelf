@@ -18,6 +18,7 @@ final class ScreenshotFolderWatcher: ObservableObject {
     private var pending: [URL: PendingFile] = [:]
     private var seen = Set<String>()
     private var startedAt = Date()
+    private var isFolderPanelOpen = false
 
     private init() {
         folderURL = loadFolderURL()
@@ -33,9 +34,11 @@ final class ScreenshotFolderWatcher: ObservableObject {
         }
 
         updateStatus("正在监听：\(folderURL.lastPathComponent)", running: true)
-        scan()
         startEventSource(for: folderURL)
         startTimer()
+        queue.async { [weak self] in
+            self?.scan()
+        }
     }
 
     func stop() {
@@ -47,7 +50,14 @@ final class ScreenshotFolderWatcher: ObservableObject {
         updateStatus(folderURL == nil ? "未选择截图文件夹" : "已暂停", running: false)
     }
 
-    func chooseFolder() {
+    func chooseFolder(attachedTo window: NSWindow? = NSApp.keyWindow) {
+        debugFolderPickerLog("open panel start")
+        guard !isFolderPanelOpen else {
+            debugFolderPickerLog("open panel skipped because one is already open")
+            return
+        }
+        isFolderPanelOpen = true
+
         let panel = NSOpenPanel()
         panel.title = "选择截图保存文件夹"
         panel.message = "把 macOS 截图设置里的保存位置选成同一个文件夹。"
@@ -57,9 +67,44 @@ final class ScreenshotFolderWatcher: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.directoryURL = folderURL ?? systemScreenshotFolder()
 
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        saveFolder(url)
-        start()
+        if let window = window ?? NSApp.keyWindow {
+            debugFolderPickerLog("presentationMode = sheet")
+            panel.beginSheetModal(for: window) { [weak self] response in
+                self?.isFolderPanelOpen = false
+                debugFolderPickerLog("open panel end")
+                let selectedURL = response == .OK ? panel.url : nil
+                debugFolderPickerLog("selected folder url exists = \(selectedURL != nil)")
+                guard let url = selectedURL else { return }
+                self?.applySelectedFolder(url)
+            }
+        } else {
+            debugFolderPickerLog("presentationMode = runModal")
+            let response = panel.runModal()
+            isFolderPanelOpen = false
+            debugFolderPickerLog("open panel end")
+            let selectedURL = response == .OK ? panel.url : nil
+            debugFolderPickerLog("selected folder url exists = \(selectedURL != nil)")
+            guard let url = selectedURL else { return }
+            applySelectedFolder(url)
+        }
+    }
+
+    func applySelectedFolder(_ url: URL, completion: (() -> Void)? = nil) {
+        debugFolderPickerLog("background folder processing start")
+        queue.async { [weak self] in
+            let bookmark = try? url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.saveFolder(url, bookmark: bookmark)
+                self.start()
+                completion?()
+            }
+        }
     }
 
     func revealFolder() {
@@ -186,15 +231,11 @@ final class ScreenshotFolderWatcher: ObservableObject {
         return CGImageSourceGetCount(source) > 0
     }
 
-    private func saveFolder(_ url: URL) {
+    private func saveFolder(_ url: URL, bookmark: Data? = nil) {
         folderURL = url
         UserDefaults.standard.set(url.path, forKey: pathKey)
 
-        if let data = try? url.bookmarkData(
-            options: [.withSecurityScope],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) {
+        if let data = bookmark {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
         }
     }
@@ -244,4 +285,11 @@ final class ScreenshotFolderWatcher: ObservableObject {
         var stableTicks = 0
         var firstSeenAt = Date()
     }
+}
+
+func debugFolderPickerLog(_ message: String) {
+#if DEBUG
+    let timestamp = String(format: "%.6f", CFAbsoluteTimeGetCurrent())
+    print("ClipShelf folder picker \(message) \(timestamp)")
+#endif
 }

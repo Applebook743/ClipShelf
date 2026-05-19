@@ -42,7 +42,9 @@ enum AppIconPreferences {
     }
 
     static func apply(_ choice: AppIconChoice) {
-        NSApp.applicationIconImage = dockImage(for: choice)
+        // Keep the Dock icon owned by the app bundle's AppIcon.icns.
+        // Runtime Dock image overrides make the running icon render at a
+        // different visual size from the non-running icon.
     }
 
     static func image(for choice: AppIconChoice) -> NSImage? {
@@ -55,12 +57,6 @@ enum AppIconPreferences {
         }
 
         return nil
-    }
-
-    static func dockImage(for choice: AppIconChoice) -> NSImage? {
-        guard let image = image(for: choice)?.copy() as? NSImage else { return nil }
-        image.size = NSSize(width: 128, height: 128)
-        return image
     }
 
     static func statusBarImage(for choice: AppIconChoice) -> NSImage? {

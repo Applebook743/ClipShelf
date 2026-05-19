@@ -25,6 +25,7 @@ struct MainView: View {
     @State private var suppressPasteUntil = Date.distantPast
     @State private var suppressRowTapUntil = Date.distantPast
     @StateObject private var updateChecker = AppUpdateChecker.shared
+    @State private var hostWindow: NSWindow?
     private let historyRowHeight: CGFloat = 74
     private let historyListHorizontalInset: CGFloat = 10
     private let historyListVerticalInset: CGFloat = 8
@@ -53,10 +54,23 @@ struct MainView: View {
         .frame(minWidth: 680, minHeight: 520)
         .background(AppTheme.appBackground)
         .overlay {
-            if showingSettings {
-                settingsOverlay
+            ZStack {
+                if showingSettings {
+                    settingsOverlay
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 0.97, anchor: .center)),
+                                removal: .opacity.combined(with: .scale(scale: 0.99, anchor: .center))
+                            )
+                        )
+                        .zIndex(10)
+                }
             }
         }
+        .animation(.spring(response: 0.26, dampingFraction: 0.88), value: showingSettings)
+        .background(WindowReader { window in
+            hostWindow = window
+        })
         .onAppear {
             installCommandKeyMonitorIfNeeded()
             updateChecker.checkIfNeeded()
@@ -77,11 +91,11 @@ struct MainView: View {
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        showingSettings = false
+                        closeSettings()
                     }
 
                 SettingsView(store: store, watcher: watcher) {
-                    showingSettings = false
+                    closeSettings()
                 }
                 .frame(width: panelWidth, height: panelHeight)
                 .background(
@@ -245,7 +259,8 @@ struct MainView: View {
                 }
 
                 Button {
-                    watcher.chooseFolder()
+                    debugFolderPickerLog("choose folder button clicked")
+                    watcher.chooseFolder(attachedTo: hostWindow)
                 } label: {
                     Image(systemName: "folder")
                 }
@@ -253,7 +268,7 @@ struct MainView: View {
                 .floatingTooltip("选择截图文件夹")
 
                 Button {
-                    showingSettings = true
+                    openSettings()
                 } label: {
                     Image(systemName: "gearshape")
                 }
@@ -314,6 +329,18 @@ struct MainView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .background(AppTheme.appBackground)
+    }
+
+    private func openSettings() {
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+            showingSettings = true
+        }
+    }
+
+    private func closeSettings() {
+        withAnimation(.easeOut(duration: 0.16)) {
+            showingSettings = false
+        }
     }
 
     private func deleteSelectedOrClear() {

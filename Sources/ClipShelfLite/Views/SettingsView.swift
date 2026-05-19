@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -15,6 +16,7 @@ struct SettingsView: View {
     @State private var clearSelectionHotKey = ClearSelectionHotKeyDefaults.load()
     @State private var pinHotKey = PinHotKeyDefaults.load()
     @State private var appIconChoice = AppIconPreferences.selected
+    @State private var hostWindow: NSWindow?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +31,7 @@ struct SettingsView: View {
                 .padding(22)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .background(AutoHidingScrollViewConfigurator())
 
             Divider()
 
@@ -43,6 +46,9 @@ struct SettingsView: View {
             .padding(.vertical, 14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WindowReader { window in
+            hostWindow = window
+        })
         .onReceive(NotificationCenter.default.publisher(for: HotKeyDefaults.changedNotification)) { notification in
             hotKey = notification.object as? HotKeyConfiguration ?? HotKeyDefaults.load()
         }
@@ -73,7 +79,7 @@ struct SettingsView: View {
                 }
             }
 
-            Text("选择后会立即更新程序坞和应用内图标，并在下次打开时继续使用。")
+            Text("选择后会立即更新应用内图标预览，并在下次打开时继续使用。程序坞图标固定使用 AppIcon，避免运行时大小变化。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -93,7 +99,8 @@ struct SettingsView: View {
 
             HStack {
                 Button("选择文件夹") {
-                    watcher.chooseFolder()
+                    debugFolderPickerLog("choose folder button clicked")
+                    watcher.chooseFolder(attachedTo: hostWindow)
                 }
 
                 Button("在访达中显示") {
@@ -347,5 +354,112 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("选择\(choice.title)")
+    }
+}
+
+private struct AutoHidingScrollViewConfigurator: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        configureSoon(from: view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        configureSoon(from: nsView, coordinator: context.coordinator)
+    }
+
+    private func configureSoon(from view: NSView, coordinator: Coordinator) {
+        DispatchQueue.main.async {
+            guard let scrollView = resolveSettingsScrollView(from: view) else { return }
+            coordinator.configure(scrollView)
+        }
+    }
+
+    private func resolveSettingsScrollView(from view: NSView) -> NSScrollView? {
+        if let enclosing = view.enclosingScrollView {
+            return enclosing
+        }
+
+        guard let contentView = view.window?.contentView else { return nil }
+        let candidates = allScrollViews(in: contentView)
+            .filter { $0.bounds.width > 120 && $0.bounds.height > 120 }
+        guard !candidates.isEmpty else { return nil }
+
+        return candidates.min { lhs, rhs in
+            lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
+        }
+    }
+
+    private func allScrollViews(in view: NSView) -> [NSScrollView] {
+        var result: [NSScrollView] = []
+        if let scrollView = view as? NSScrollView {
+            result.append(scrollView)
+        }
+
+        for subview in view.subviews {
+            result.append(contentsOf: allScrollViews(in: subview))
+        }
+
+        return result
+    }
+
+    final class Coordinator {
+        private weak var scrollView: NSScrollView?
+        private var monitor: Any?
+        private var hideWorkItem: DispatchWorkItem?
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+
+        func configure(_ scrollView: NSScrollView) {
+            guard self.scrollView !== scrollView else { return }
+            self.scrollView = scrollView
+            scrollView.scrollerStyle = .overlay
+            scrollView.autohidesScrollers = true
+            scrollView.hasVerticalScroller = true
+            scrollView.verticalScroller?.isHidden = true
+            scrollView.verticalScroller?.alphaValue = 0
+            installMonitorIfNeeded()
+        }
+
+        private func installMonitorIfNeeded() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      let scrollView,
+                      event.window === scrollView.window else {
+                    return event
+                }
+
+                let point = scrollView.convert(event.locationInWindow, from: nil)
+                if scrollView.bounds.contains(point) {
+                    showScrollerBriefly(scrollView)
+                }
+
+                return event
+            }
+        }
+
+        private func showScrollerBriefly(_ scrollView: NSScrollView) {
+            scrollView.hasVerticalScroller = true
+            scrollView.verticalScroller?.isHidden = false
+            scrollView.verticalScroller?.alphaValue = 1
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+
+            hideWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak scrollView] in
+                scrollView?.verticalScroller?.alphaValue = 0
+                scrollView?.verticalScroller?.isHidden = true
+            }
+            hideWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: workItem)
+        }
     }
 }
