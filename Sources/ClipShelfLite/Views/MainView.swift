@@ -324,7 +324,7 @@ struct MainView: View {
         case 49:
             let items = previewItems
             if !items.isEmpty {
-                PreviewController.shared.togglePreview(items)
+                PreviewController.shared.togglePreview(items, onNavigate: navigatePreview)
             }
         case 36, 76:
             if let item = focusedItem {
@@ -719,8 +719,12 @@ struct MainView: View {
 
     private var previewItems: [ClipItem] {
         let selected = filteredItems.filter { selectedIDs.contains($0.id) }
-        if !selected.isEmpty {
+        if selected.count == 1 {
             return selected
+        }
+
+        if selected.count > 1 {
+            return []
         }
 
         if let focusedItem {
@@ -728,6 +732,25 @@ struct MainView: View {
         }
 
         return []
+    }
+
+    private func navigatePreview(direction: Int) -> Bool {
+        guard !filteredItems.isEmpty else { return false }
+
+        let currentID = focusedID ?? selectedIDs.first
+        guard let currentID,
+              let currentIndex = filteredItems.firstIndex(where: { $0.id == currentID }) else {
+            return false
+        }
+
+        let nextIndex = min(max(currentIndex + direction, 0), filteredItems.count - 1)
+        guard nextIndex != currentIndex else { return false }
+
+        let item = filteredItems[nextIndex]
+        collapseSelection(to: item)
+        revealKeyboardSelectionIfNeeded(item.id, direction: direction)
+        PreviewController.shared.preview([item], onNavigate: navigatePreview)
+        return true
     }
 
     private func beginDragSelection(at id: ClipItem.ID) {

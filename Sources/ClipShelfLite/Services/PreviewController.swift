@@ -5,23 +5,24 @@ import QuickLookUI
 final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     static let shared = PreviewController()
 
-    private var previewURLs: [URL] = []
+    private var previewEntries: [PreviewEntry] = []
     private var temporaryURLs: [URL] = []
     private var previewWindow: NSWindow?
     private var keyMonitor: Any?
+    private var onNavigate: ((Int) -> Bool)?
 
-    func togglePreview(_ items: [ClipItem]) {
+    func togglePreview(_ items: [ClipItem], onNavigate: ((Int) -> Bool)? = nil) {
         if closeIfVisible() {
             return
         }
 
-        preview(items)
+        preview(items, onNavigate: onNavigate)
     }
 
-    func preview(_ items: [ClipItem]) {
-        if showBuiltInPreviewIfPossible(items) {
-            return
-        }
+    func preview(_ items: [ClipItem], onNavigate: ((Int) -> Bool)? = nil) {
+        guard items.count == 1 else { return }
+
+        self.onNavigate = onNavigate
 
         if let panel = QLPreviewPanel.shared(), panel.isVisible {
             panel.orderOut(nil)
@@ -29,9 +30,14 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
         previewWindow?.orderOut(nil)
 
         cleanupTemporaryFiles()
-        previewURLs = items.compactMap(previewURL(for:))
 
-        guard !previewURLs.isEmpty, let panel = QLPreviewPanel.shared() else {
+        if showBuiltInPreviewIfPossible(items) {
+            return
+        }
+
+        previewEntries = items.compactMap(previewEntry(for:))
+
+        guard !previewEntries.isEmpty, let panel = QLPreviewPanel.shared() else {
             return
         }
 
@@ -39,17 +45,26 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
         panel.dataSource = self
         panel.delegate = self
         panel.reloadData()
+        applyFixedPreviewFrame(to: panel)
         startKeyMonitor()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(self)
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        previewURLs.count
+        previewEntries.count
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
-        previewURLs[index] as NSURL
+        previewEntries[index].url as NSURL
+    }
+
+    private func previewEntry(for item: ClipItem) -> PreviewEntry? {
+        guard let url = previewURL(for: item) else { return nil }
+        return PreviewEntry(
+            url: url,
+            recommendedSize: recommendedSize(for: item, url: url)
+        )
     }
 
     private func previewURL(for item: ClipItem) -> URL? {
@@ -92,6 +107,7 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
 
         if didClose {
             stopKeyMonitor()
+            onNavigate = nil
         }
 
         return didClose
@@ -174,6 +190,112 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
         show(panel, firstResponder: textView)
     }
 
+    private func recommendedSize(for item: ClipItem, url: URL) -> NSSize {
+        switch item.kind {
+        case .image:
+            let image = image(for: item) ?? NSImage(contentsOf: url)
+            return recommendedImageWindowSize(for: image?.size)
+        case .text:
+            return NSSize(width: 760, height: 560)
+        case .file:
+            return NSSize(width: 900, height: 700)
+        }
+    }
+
+    private func recommendedImageWindowSize(for imageSize: NSSize?) -> NSSize {
+        let minimum = NSSize(width: 520, height: 380)
+        guard let imageSize,
+              imageSize.width > 0,
+              imageSize.height > 0 else {
+            return NSSize(width: 760, height: 560)
+        }
+
+        let maxSize = maximumPreviewWindowSize()
+        let paddedSize = NSSize(
+            width: imageSize.width + 96,
+            height: imageSize.height + 120
+        )
+        let scale = min(
+            maxSize.width / paddedSize.width,
+            maxSize.height / paddedSize.height,
+            1
+        )
+
+        return NSSize(
+            width: min(max(paddedSize.width * scale, minimum.width), maxSize.width),
+            height: min(max(paddedSize.height * scale, minimum.height), maxSize.height)
+        )
+    }
+
+    private func maximumPreviewWindowSize() -> NSSize {
+        let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        return NSSize(
+            width: max(520, visibleFrame.width * 0.9),
+            height: max(380, visibleFrame.height * 0.9)
+        )
+    }
+
+    private func constrainedPreviewSize(_ size: NSSize, for panel: NSWindow) -> NSSize {
+        let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let minimum = NSSize(width: 520, height: 380)
+        let maximum = NSSize(width: visibleFrame.width * 0.92, height: visibleFrame.height * 0.92)
+
+        return NSSize(
+            width: min(max(size.width, minimum.width), maximum.width),
+            height: min(max(size.height, minimum.height), maximum.height)
+        )
+    }
+
+    private func applyFixedPreviewFrame(to panel: NSWindow) {
+        let size = fixedPreviewWindowSize(for: panel)
+        let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let frame = centeredFrame(for: size, in: visibleFrame)
+        panel.setFrame(frame, display: true, animate: false)
+    }
+
+    private func fixedPreviewWindowSize(for panel: NSWindow) -> NSSize {
+        let fallback = NSSize(width: 760, height: 560)
+        let largestSize = previewEntries.reduce(fallback) { partial, entry in
+            NSSize(
+                width: max(partial.width, entry.recommendedSize.width),
+                height: max(partial.height, entry.recommendedSize.height)
+            )
+        }
+
+        return constrainedPreviewSize(largestSize, for: panel)
+    }
+
+    private func centeredFrame(for size: NSSize, in visibleFrame: NSRect) -> NSRect {
+        let anchor = centerPoint(of: visibleFrame)
+        var frame = NSRect(
+            x: anchor.x - size.width / 2,
+            y: anchor.y - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+
+        if frame.minX < visibleFrame.minX {
+            frame.origin.x = visibleFrame.minX
+        }
+        if frame.maxX > visibleFrame.maxX {
+            frame.origin.x = visibleFrame.maxX - frame.width
+        }
+        if frame.minY < visibleFrame.minY {
+            frame.origin.y = visibleFrame.minY
+        }
+        if frame.maxY > visibleFrame.maxY {
+            frame.origin.y = visibleFrame.maxY - frame.height
+        }
+
+        return frame
+    }
+
+    private func centerPoint(of rect: NSRect) -> CGPoint {
+        CGPoint(x: rect.midX, y: rect.midY)
+    }
+
     private func previewPanel(title: String, size: NSSize) -> NSPanel {
         previewWindow?.orderOut(nil)
 
@@ -206,15 +328,37 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
     private func startKeyMonitor() {
         stopKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            guard event.keyCode == 49,
-                  let self,
-                  self.previewWindow?.isVisible == true || QLPreviewPanel.shared()?.isVisible == true else {
+            guard let self, self.isPreviewVisible else {
                 return event
             }
 
-            self.closeIfVisible()
+            if event.keyCode == 49 {
+                self.closeIfVisible()
+                return nil
+            }
+
+            if let direction = self.previewNavigationDirection(for: event),
+               self.onNavigate?(direction) == true {
+                return nil
+            }
+
+            return event
+        }
+    }
+
+    private var isPreviewVisible: Bool {
+        previewWindow?.isVisible == true || QLPreviewPanel.shared()?.isVisible == true
+    }
+
+    private func previewNavigationDirection(for event: NSEvent) -> Int? {
+        guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else {
             return nil
         }
+
+        if event.keyCode == 123 { return -1 }
+        if event.keyCode == 124 { return 1 }
+
+        return nil
     }
 
     private func stopKeyMonitor() {
@@ -230,6 +374,11 @@ final class PreviewController: NSObject, QLPreviewPanelDataSource, QLPreviewPane
         }
         temporaryURLs.removeAll()
     }
+}
+
+private struct PreviewEntry {
+    let url: URL
+    let recommendedSize: NSSize
 }
 
 private final class SpaceClosablePanel: NSPanel {
